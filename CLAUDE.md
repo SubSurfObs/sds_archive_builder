@@ -1,0 +1,167 @@
+# CLAUDE.md — SDS Archive Builder
+
+## Project Purpose
+
+Python tooling to build and maintain a local seismic waveform archive in **SDS (SeisComP Data Structure)** format. Data is pulled from remote **FDSN servers** (via ObsPy) and, in Phase 2, from **ASDF** (Adaptable Seismic Data Format) files. The archive covers a geographically-bounded region in SE Australia / Victoria.
+
+---
+
+## Deployment Context
+
+- **Runtime environment:** University Linux VM
+- **Archive storage:** SMB mount (MediaFlux) — treat as potentially slow or intermittently unavailable
+- **Write strategy:** Local VM disk first → `rsync` to SMB archive. Local disk is small (holds days–weeks of data)
+- **Environment management:** **conda only** — do not suggest venv or pip-only workflows
+- **Git remote:** `https://github.com/SubSurfObs/sds_archive_builder.git`
+
+---
+
+## Architecture Overview
+
+```
+config/
+  archive.yaml              # Global settings: SDS root, geo bounds, retry policy
+  networks/
+    AU.yaml                 # Per-network: servers, channels, date range
+    GE.yaml
+    ...
+
+sds_archive_builder/        # Main package
+  config.py                 # Load + validate YAML configs
+  database.py               # SQLite via SQLAlchemy — stations, requests, server health
+  geo_filter.py             # Bounding box / polygon station filtering
+
+  clients/
+    base.py                 # Abstract: fetch_waveforms(), fetch_inventory()
+    fdsn_client.py          # ObsPy FDSN with fallback servers + rate limiting
+    asdf_client.py          # pyasdf → ObsPy Stream (Phase 2)
+
+  archive/
+    sds_writer.py           # Write ObsPy Stream to SDS (local-first)
+    sds_query.py            # Query local SDS for day-level coverage
+
+  runner/
+    inventory_sync.py       # Pull station metadata, populate DB, apply geo filter
+    backfill.py             # Walk time range, skip existing, log attempts
+    daily_update.py         # Pull recent days; re-attempt scheduled retries
+
+scripts/
+  sync_inventory.py         # CLI entrypoint: refresh station metadata
+  run_backfill.py           # CLI entrypoint: historical fill
+  run_daily.py              # CLI entrypoint: cron-friendly daily pull (+ rsync)
+  audit_archive.py          # CLI entrypoint: coverage report, retry candidates
+```
+
+---
+
+## Database Schema
+
+Three tables in SQLite (`archive.db` at the SDS root or local staging dir):
+
+### `stations`
+| Column | Notes |
+|--------|-------|
+| `net`, `sta`, `loc`, `cha` | SEED identifiers |
+| `latitude`, `longitude`, `elevation` | From inventory |
+| `start_date`, `end_date` | Metadata epoch — treated as a **hint only**, not ground truth |
+| `in_geo_bounds` | Boolean; set at inventory sync |
+| `last_inventory_sync` | Timestamp |
+
+### `fetch_requests`
+| Column | Notes |
+|--------|-------|
+| `net`, `sta`, `loc`, `cha`, `day` | What was requested |
+| `server` | Which server was tried |
+| `status` | `pending` \| `success` \| `no_data` \| `error` \| `rate_limited` |
+| `attempt_count` | Incremented on each try |
+| `last_attempt` | Timestamp |
+| `bytes_written` | 0 if no data |
+| `error_message` | Last error string |
+| `retry_after` | Next scheduled retry date (for `no_data` / `error`) |
+
+### `server_health`
+| Column | Notes |
+|--------|-------|
+| `server` | Server name |
+| `last_success`, `last_failure` | Timestamps |
+| `consecutive_failures` | Reset on success |
+| `requests_today` | Rolling count |
+| `backoff_until` | Don't request before this time |
+
+---
+
+## Key Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Day-by-day request granularity | Natural SDS unit; enables per-day tracking and retry |
+| `no_data` ≠ permanent | Retrospective data uploads are expected; retry at 7d / 30d / 90d intervals |
+| Metadata start date = hint | Station epochs in metadata are sometimes wrong; treat as lower-bound hint |
+| Server fallback chain | Per-network primary + fallback server; skip server if `backoff_until` is in future |
+| Local-first writes | SMB may be slow or offline; always write to local staging, rsync separately |
+| Geographic filter at inventory sync | Filter once on metadata; don't re-check coordinates on every waveform fetch |
+| Adaptive rate limiting | Track `server_health`; back off exponentially on 429 / timeout |
+| Testing mode | Bounded date range + dry-run flag; does not write to archive or DB |
+
+---
+
+## Geographic Buffering
+
+When requesting station inventory, apply a **buffer** (configurable, default 0.5°) around the target bounding box. This accounts for:
+- Metadata coordinates that are slightly off
+- Stations just outside the target region that may still record relevant signals
+
+The tighter operational filter is applied post-fetch from the `stations` table (`in_geo_bounds`).
+
+---
+
+## Operating Modes
+
+| Mode | Description |
+|------|-------------|
+| `testing` | Bounded time window, verbose logging, no writes to main archive |
+| `backfill` | Historical fill from `history.start` to present, oldest- or newest-first |
+| `daily` | Pull last N days; run scheduled retries; optionally rsync to SMB |
+| `audit` | Read-only; report coverage gaps and retry candidates |
+
+---
+
+## Conventions
+
+- All times in **UTC**
+- SEED channel codes (e.g. `HHZ`, `BHN`) — never assume a channel exists without checking inventory
+- SDS path format: `{sds_root}/{year}/{network}/{station}/{channel}.D/{net}.{sta}.{loc}.{cha}.D.{year}.{julday}`
+- Config files: **YAML** (not TOML, not JSON)
+- No hardcoded network names, server URLs, or date ranges in Python source — always from config
+- Log with Python `logging` module; scripts set up handlers; library code uses `getLogger(__name__)`
+
+---
+
+## Environment Setup
+
+```bash
+conda env create -f environment.yml
+conda activate sds_archive_builder
+```
+
+Key dependencies: `obspy`, `sqlalchemy`, `pyyaml`, `click` (CLI), `pyasdf` (Phase 2).
+
+---
+
+## Phase 2: ASDF Integration
+
+Geoscience Australia ran a 2-year deployment across Victoria stored as ASDF on a supercomputer. `asdf_client.py` will:
+1. Accept a path (local filesystem or SSH-mounted) to an ASDF HDF5 file
+2. Use `pyasdf.ASDFDataSet` to iterate waveforms
+3. Return `obspy.Stream` — identical interface to `fdsn_client.py`
+4. Log to `fetch_requests` with `server = "ASDF:<filename>"`
+
+---
+
+## What NOT to Do
+
+- Do not trust metadata `start_date` / `end_date` as definitive waveform availability
+- Do not treat a failed or empty FDSN response as proof that no data exists
+- Do not write directly to the SMB mount during testing mode
+- Do not hardcode geographic bounds — read from `config/archive.yaml`
+- Do not use `pip install` alone — always update `environment.yml`
