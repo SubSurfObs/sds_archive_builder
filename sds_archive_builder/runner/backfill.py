@@ -1,0 +1,266 @@
+"""
+Historical backfill runner.
+
+For each in-bounds station channel, walks the date range from history.start
+to today (or a user-specified end), requesting one day at a time.
+
+Skips:
+  - Days already present in the SDS archive (if skip_existing=True)
+  - Days with a "success" record in the DB
+  - Days where retry_after is in the future
+
+Records every attempt in fetch_requests, regardless of outcome.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+from sds_archive_builder.archive.sds_writer import day_file_exists, write_stream
+from sds_archive_builder.clients.base import FetchError, NoDataError, RateLimitedError
+from sds_archive_builder.clients.fdsn_client import FDSNClient
+from sds_archive_builder.config import ArchiveConfig, NetworkConfig
+from sds_archive_builder.database import (
+    FetchRequest, Station,
+    get_fetch_request, get_stations_in_bounds, init_db,
+    session_scope, upsert_fetch_request,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _staging_root(archive_config: ArchiveConfig, testing: bool, test_output_dir: Optional[Path]) -> Path:
+    if testing and test_output_dir:
+        return test_output_dir
+    return archive_config.local_staging
+
+
+def _should_skip(
+    session,
+    net: str, sta: str, loc: str, cha: str,
+    day: date,
+    server: str,
+    staging_root: Path,
+    skip_existing: bool,
+) -> bool:
+    """Return True if this (station, day) should be skipped."""
+    # Already successfully written
+    req = get_fetch_request(session, net, sta, loc, cha, day, server)
+    if req and req.status == "success":
+        return True
+
+    # SDS file already present
+    if skip_existing and day_file_exists(staging_root, net, sta, loc, cha, day):
+        return True
+
+    # Scheduled for future retry
+    if req and req.retry_after and req.retry_after > date.today():
+        return True
+
+    # Exhausted max attempts
+    if req and req.attempt_count >= 5:
+        return True
+
+    return False
+
+
+def _record_attempt(
+    session,
+    net: str, sta: str, loc: str, cha: str,
+    day: date, server: str,
+    status: str,
+    bytes_written: int = 0,
+    error_message: Optional[str] = None,
+    retry_after: Optional[date] = None,
+    attempt_count: int = 1,
+):
+    upsert_fetch_request(
+        session,
+        network=net,
+        station=sta,
+        location=loc,
+        channel=cha,
+        day=day,
+        server=server,
+        status=status,
+        attempt_count=attempt_count,
+        last_attempt=datetime.utcnow(),
+        bytes_written=bytes_written,
+        error_message=error_message,
+        retry_after=retry_after,
+    )
+
+
+def run_backfill(
+    archive_config: ArchiveConfig,
+    network_configs: dict[str, NetworkConfig],
+    *,
+    start: Optional[date] = None,
+    end: Optional[date] = None,
+    networks: Optional[list[str]] = None,
+    testing: bool = False,
+    test_output_dir: Optional[Path] = None,
+    inter_request_delay_s: float = 1.0,
+) -> dict:
+    """
+    Run a backfill across all in-bounds stations.
+
+    Args:
+        start: Override the per-network history.start. If None, uses network config.
+        end: Last day to fetch (inclusive). Defaults to yesterday.
+        networks: Limit to these network codes. None = all configured.
+        testing: If True, write to test_output_dir instead of local_staging.
+        test_output_dir: Required when testing=True.
+        inter_request_delay_s: Seconds to sleep between requests.
+
+    Returns:
+        Summary dict with counts of success, no_data, error, skipped.
+    """
+    if testing and test_output_dir is None:
+        raise ValueError("test_output_dir must be set when testing=True")
+
+    engine = init_db(archive_config.db_path)
+    staging = _staging_root(archive_config, testing, test_output_dir)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    target_nets = networks or list(network_configs.keys())
+    end_date = end or (date.today() - timedelta(days=1))
+
+    totals = {"success": 0, "no_data": 0, "error": 0, "skipped": 0, "rate_limited": 0}
+
+    for net_code in target_nets:
+        if net_code not in network_configs:
+            logger.warning("Network %s not in config — skipping", net_code)
+            continue
+
+        net_cfg = network_configs[net_code]
+        retry_policy = net_cfg.effective_retry_policy(archive_config)
+        server = net_cfg.servers.primary
+        skip_existing = archive_config.backfill.skip_existing
+
+        # Date range for this network
+        net_start = start or date.fromisoformat(net_cfg.history_start)
+        if net_start > end_date:
+            logger.info("Network %s: history start %s is after end date %s — skipping",
+                        net_code, net_start, end_date)
+            continue
+
+        # Walk direction
+        date_range = _date_range(net_start, end_date, archive_config.backfill.mode)
+
+        # Get in-bounds stations for this network
+        with session_scope(engine) as session:
+            stations = get_stations_in_bounds(session, network=net_code)
+
+        if not stations:
+            logger.warning("No in-bounds stations found for %s — run inventory sync first", net_code)
+            continue
+
+        logger.info(
+            "Backfill %s: %d channels, %s → %s (%s)",
+            net_code, len(stations), net_start, end_date, archive_config.backfill.mode,
+        )
+
+        client = FDSNClient(net_cfg, archive_config, engine)
+
+        for day in date_range:
+            for sta_row in stations:
+                net = sta_row.network
+                sta = sta_row.station
+                loc = sta_row.location
+                cha = sta_row.channel
+
+                with session_scope(engine) as session:
+                    if _should_skip(session, net, sta, loc, cha, day, server, staging, skip_existing):
+                        totals["skipped"] += 1
+                        continue
+
+                    # Determine attempt count
+                    existing_req = get_fetch_request(session, net, sta, loc, cha, day, server)
+                    attempt_count = (existing_req.attempt_count + 1) if existing_req else 1
+
+                try:
+                    stream = client.get_waveforms(net, sta, loc, cha, day)
+                    results = write_stream(stream, staging)
+                    nbytes = sum(results.values())
+
+                    with session_scope(engine) as session:
+                        _record_attempt(
+                            session, net, sta, loc, cha, day, server,
+                            status="success",
+                            bytes_written=nbytes,
+                            attempt_count=attempt_count,
+                        )
+                    totals["success"] += 1
+                    logger.debug("✓ %s.%s.%s.%s %s (%d bytes)", net, sta, loc, cha, day, nbytes)
+
+                except NoDataError as exc:
+                    retry_days = retry_policy.no_data_retry_days(attempt_count)
+                    retry_after = date.today() + timedelta(days=retry_days)
+                    with session_scope(engine) as session:
+                        _record_attempt(
+                            session, net, sta, loc, cha, day, server,
+                            status="no_data",
+                            error_message=str(exc),
+                            retry_after=retry_after,
+                            attempt_count=attempt_count,
+                        )
+                    totals["no_data"] += 1
+                    logger.debug("∅ %s.%s.%s.%s %s — no data (retry after %s)",
+                                 net, sta, loc, cha, day, retry_after)
+
+                except RateLimitedError as exc:
+                    retry_after = date.today() + timedelta(days=1)
+                    with session_scope(engine) as session:
+                        _record_attempt(
+                            session, net, sta, loc, cha, day, server,
+                            status="rate_limited",
+                            error_message=str(exc),
+                            retry_after=retry_after,
+                            attempt_count=attempt_count,
+                        )
+                    totals["rate_limited"] += 1
+                    logger.warning("Rate limited on %s — pausing 60s", server)
+                    time.sleep(60)
+
+                except FetchError as exc:
+                    retry_days = retry_policy.error_backoff_days(attempt_count)
+                    retry_after = date.today() + timedelta(days=retry_days)
+                    with session_scope(engine) as session:
+                        _record_attempt(
+                            session, net, sta, loc, cha, day, server,
+                            status="error",
+                            error_message=str(exc),
+                            retry_after=retry_after,
+                            attempt_count=attempt_count,
+                        )
+                    totals["error"] += 1
+                    logger.warning("✗ %s.%s.%s.%s %s — error: %s", net, sta, loc, cha, day, exc)
+
+                if inter_request_delay_s > 0:
+                    time.sleep(inter_request_delay_s)
+
+    logger.info(
+        "Backfill complete: success=%d no_data=%d error=%d rate_limited=%d skipped=%d",
+        totals["success"], totals["no_data"], totals["error"],
+        totals["rate_limited"], totals["skipped"],
+    )
+    return totals
+
+
+def _date_range(start: date, end: date, mode: str):
+    """Generate dates from start to end (inclusive), in specified direction."""
+    if mode == "newest_first":
+        current = end
+        while current >= start:
+            yield current
+            current -= timedelta(days=1)
+    else:  # oldest_first
+        current = start
+        while current <= end:
+            yield current
+            current += timedelta(days=1)

@@ -1,0 +1,41 @@
+# Network AM — RaspberryShake citizen seismograph network
+# Served exclusively via data.raspberryshake.org.
+# Station density is high but quality is variable; many are 1-component (vertical only).
+
+network: AM
+description: "RaspberryShake citizen seismograph network"
+
+# RS1D: vertical only (EHZ)
+# RS3D / RSHAKE 4D: 3-component seismic + accelerometer
+# Request broad channel set; inventory will show what each station actually has.
+channels:
+  - "EHZ"
+  - "EHN"
+  - "EHE"
+  - "HHZ"
+  - "HHN"
+  - "HHE"
+  - "HNZ"
+  - "HNN"
+  - "HNE"
+  - "SHZ"
+
+location_codes:
+  - "00"
+  - ""
+
+servers:
+  primary: "https://data.raspberryshake.org"
+  fallback: null
+
+history:
+  # RaspberryShake network launched ~2016
+  start: "2016-01-01"
+  # RS server is generally low-latency
+  data_lag_days: 1
+
+retry_policy:
+  max_attempts: 3
+  # RS stations are often decommissioned without notice; don't retry too aggressively
+  retry_after_days: [14, 60, 180]
+  error_backoff_max_days: 7

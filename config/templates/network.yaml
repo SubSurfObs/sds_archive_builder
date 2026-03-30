@@ -1,0 +1,52 @@
+# Network Configuration Template
+# Copy to <instance_dir>/networks/<NETWORK_CODE>.yaml and edit.
+
+network: XX          # FDSN network code (e.g. OZ, AU, AM, S1)
+description: "Short description of this network"
+
+# ── Channels ─────────────────────────────────────────────────────────────────
+# FDSN channel codes to request. Use FNMATCH wildcards (e.g. "HH?" for all
+# HH components). List specific codes to avoid pulling unwanted channels.
+channels:
+  - "HHZ"
+  - "HHN"
+  - "HHE"
+  - "BHZ"
+  - "BHN"
+  - "BHE"
+
+# Location codes to request. Use "" for blank location codes.
+location_codes:
+  - ""
+  - "00"
+  - "10"
+
+# ── Servers ───────────────────────────────────────────────────────────────────
+# primary:  tried first
+# fallback: tried if primary fails or is backed off
+# Values can be ObsPy shortnames (IRIS, ORFEUS, GFZ, AUSPASS) or full base URLs.
+servers:
+  primary: "IRIS"
+  fallback: null          # Set to null if no fallback
+
+# ── History ──────────────────────────────────────────────────────────────────
+history:
+  # Earliest date to attempt backfill. Format: YYYY-MM-DD
+  start: "2000-01-01"
+  # How many days behind real-time data may arrive on this server.
+  # The daily runner pulls at least this many days back.
+  data_lag_days: 2
+
+# ── Retry Policy (optional — inherits from archive.yaml if omitted) ──────────
+# retry_policy:
+#   max_attempts: 5
+#   retry_after_days: [7, 30, 90]
+
+# ── Geographic Bounds (optional — inherits from archive.yaml if omitted) ─────
+# Uncomment to override the global bounds for this network.
+# geo_bounds:
+#   min_lat: -39.0
+#   max_lat: -36.0
+#   min_lon: 144.5
+#   max_lon: 149.0
+#   buffer_deg: 0.5

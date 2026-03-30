@@ -1,0 +1,79 @@
+# SDS Archive Builder — Instance Configuration
+# Copy this file to your instance directory and edit.
+# All paths should be absolute.
+
+# ── Storage ──────────────────────────────────────────────────────────────────
+
+# Final archive destination (e.g. SMB/MediaFlux mount).
+# In testing mode this is NOT written to — use test_output instead.
+sds_root: "/mnt/mediaflux/SDS/victoria"
+
+# Local VM staging directory. Waveforms land here first; rsync pushes to sds_root.
+# Should have space for at least a few weeks of data.
+local_staging: "/scratch/sds_staging/victoria"
+
+# ── Geographic Bounds ─────────────────────────────────────────────────────────
+# Victoria / SE Australia region.
+# buffer_deg expands the FDSN inventory query — accounts for metadata coords
+# that are slightly off. The tighter bounds below are applied after fetching.
+
+geo_bounds:
+  min_lat: -39.0
+  max_lat: -36.0
+  min_lon: 144.5
+  max_lon: 149.0
+  buffer_deg: 0.5   # Inventory request = bounds expanded by this amount
+
+# ── Request Behaviour ─────────────────────────────────────────────────────────
+
+# Granularity of each waveform request (days). 1 is recommended — it matches
+# SDS file granularity and simplifies tracking.
+chunk_size_days: 1
+
+# Per-request timeout in seconds.
+request_timeout_s: 120
+
+# Maximum simultaneous requests across all servers.
+# Keep low to avoid rate-limiting across servers.
+max_concurrent_requests: 2
+
+# ── Retry Policy (default — can be overridden per network) ───────────────────
+
+retry_policy:
+  # Maximum total attempts per (station, day, server) combination.
+  max_attempts: 5
+  # After a "no_data" response, re-attempt after this many days.
+  # Accommodates servers that backfill historical data over time.
+  # Intervals correspond to attempt 1, 2, 3+ (last value repeated).
+  retry_after_days: [7, 30, 90]
+  # After an "error" response, exponential backoff capped at this many days.
+  error_backoff_max_days: 14
+
+# ── Backfill ──────────────────────────────────────────────────────────────────
+
+backfill:
+  # Direction to walk the time range: "oldest_first" or "newest_first"
+  mode: "newest_first"
+  # Skip station/days already present in the SDS archive
+  skip_existing: true
+
+# ── Daily Update ─────────────────────────────────────────────────────────────
+
+daily:
+  # Pull waveforms for the last N days on each daily run (catches delayed data)
+  lookback_days: 7
+  # Run scheduled retries during the daily job
+  run_retries: true
+  # Rsync local_staging → sds_root after each daily run
+  auto_rsync: false
+  # rsync options (appended to: rsync -av <local_staging>/ <sds_root>/)
+  rsync_options: "--checksum --delete"
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+
+logging:
+  level: "INFO"          # DEBUG | INFO | WARNING | ERROR
+  # Log file relative to instance directory. Leave empty to log to stdout only.
+  file: "logs/archive.log"
+  max_bytes: 10485760    # 10 MB
+  backup_count: 5

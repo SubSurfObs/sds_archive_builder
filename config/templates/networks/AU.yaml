@@ -1,0 +1,28 @@
+# Network AU — Australian National Seismograph Network (via IRIS/EarthScope)
+# Primary server: IRIS (EarthScope). AUSPASS as fallback.
+
+network: AU
+description: "Australian National Seismograph Network — via IRIS/EarthScope"
+
+channels:
+  - "BHZ"
+  - "BHN"
+  - "BHE"
+  - "HHZ"
+  - "HHN"
+  - "HHE"
+  - "LHZ"
+
+location_codes:
+  - ""
+  - "00"
+  - "10"
+
+servers:
+  # ObsPy shortname "IRIS" resolves to EarthScope (service.earthscope.org)
+  primary: "IRIS"
+  fallback: "https://auspass.edu.au"
+
+history:
+  start: "2000-01-01"
+  data_lag_days: 2

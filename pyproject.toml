@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "sds_archive_builder"
+version = "0.1.0"
+description = "Build and maintain a local seismic SDS archive from FDSN servers"
+requires-python = ">=3.11"
+dependencies = [
+    "obspy>=1.4",
+    "sqlalchemy>=2.0",
+    "pyyaml>=6.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+asdf = ["pyasdf>=0.8"]
+
+[project.scripts]
+sds-init       = "scripts.init_instance:main"
+sds-inventory  = "scripts.sync_inventory:main"
+sds-backfill   = "scripts.run_backfill:main"
+sds-daily      = "scripts.run_daily:main"
+sds-audit      = "scripts.audit_archive:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sds_archive_builder*", "scripts*"]

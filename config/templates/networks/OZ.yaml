@@ -1,0 +1,29 @@
+# Network OZ — Geoscience Australia Seismograph Network
+# Served via AUSPASS (primary). No reliable public fallback.
+
+network: OZ
+description: "Geoscience Australia permanent seismograph network"
+
+channels:
+  - "HHZ"
+  - "HHN"
+  - "HHE"
+  - "BHZ"
+  - "BHN"
+  - "BHE"
+  - "SHZ"
+
+location_codes:
+  - ""
+  - "00"
+  - "10"
+
+servers:
+  primary: "https://auspass.edu.au"
+  fallback: null
+
+history:
+  start: "2000-01-01"
+  # GA network has gaps; historical data continues to be made available.
+  # Treat no_data as potentially temporary.
+  data_lag_days: 3

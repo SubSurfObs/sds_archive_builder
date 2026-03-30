@@ -1,0 +1,33 @@
+# Network S1 — AusArray (Geoscience Australia passive seismic experiment)
+# Served via AUSPASS. Historical data being progressively uploaded.
+
+network: S1
+description: "AusArray — Geoscience Australia passive seismic deployment"
+
+channels:
+  - "HHZ"
+  - "HHN"
+  - "HHE"
+  - "BHZ"
+  - "BHN"
+  - "BHE"
+
+location_codes:
+  - ""
+  - "00"
+
+servers:
+  primary: "https://auspass.edu.au"
+  fallback: null
+
+history:
+  # AusArray deployments from ~2019 onwards
+  start: "2019-01-01"
+  # Data upload is ongoing and may lag significantly
+  data_lag_days: 30
+
+retry_policy:
+  max_attempts: 5
+  # Check more aggressively as data continues to come online
+  retry_after_days: [7, 21, 60]
+  error_backoff_max_days: 14
