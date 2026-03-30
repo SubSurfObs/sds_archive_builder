@@ -16,47 +16,70 @@ Python tooling to build and maintain a local seismic waveform archive in **SDS (
 
 ---
 
+## Package vs. Instance
+
+The codebase is a **generic, installable tool**. A specific deployment (e.g. "Victoria seismic archive") is an **instance** — a separate directory containing only config files and the live SQLite database.
+
+```
+# The generic tool (this repo — public)
+~/sds_archive_builder/
+
+# A deployment instance (lives on the VM — not in this repo)
+~/instances/victoria/
+    archive.yaml          # Paths, geo bounds, retry policy for this deployment
+    networks/
+        AU.yaml
+        GE.yaml
+    archive.db            # Live request-tracking DB — never committed anywhere
+    logs/                 # Log files — never committed
+```
+
+All CLI scripts accept `--instance <path>` (or `SDS_ARCHIVE_INSTANCE` env var) pointing to the instance directory. No config files live in this repo except templates.
+
+---
+
 ## Architecture Overview
 
 ```
 config/
-  archive.yaml              # Global settings: SDS root, geo bounds, retry policy
-  networks/
-    AU.yaml                 # Per-network: servers, channels, date range
-    GE.yaml
-    ...
+  templates/
+    archive.yaml          # Template: copy to instance dir and edit
+    network.yaml          # Template: one copy per network in instance/networks/
 
-sds_archive_builder/        # Main package
-  config.py                 # Load + validate YAML configs
-  database.py               # SQLite via SQLAlchemy — stations, requests, server health
-  geo_filter.py             # Bounding box / polygon station filtering
+sds_archive_builder/      # Main package (installed via conda)
+  config.py               # Load + validate instance YAML configs
+  database.py             # SQLite via SQLAlchemy — stations, requests, server health
+  geo_filter.py           # Bounding box / polygon station filtering
 
   clients/
-    base.py                 # Abstract: fetch_waveforms(), fetch_inventory()
-    fdsn_client.py          # ObsPy FDSN with fallback servers + rate limiting
-    asdf_client.py          # pyasdf → ObsPy Stream (Phase 2)
+    base.py               # Abstract: fetch_waveforms(), fetch_inventory()
+    fdsn_client.py        # ObsPy FDSN with fallback servers + rate limiting
+    asdf_client.py        # pyasdf → ObsPy Stream (Phase 2)
 
   archive/
-    sds_writer.py           # Write ObsPy Stream to SDS (local-first)
-    sds_query.py            # Query local SDS for day-level coverage
+    sds_writer.py         # Write ObsPy Stream to SDS (local-first)
+    sds_query.py          # Query local SDS for day-level coverage
 
   runner/
-    inventory_sync.py       # Pull station metadata, populate DB, apply geo filter
-    backfill.py             # Walk time range, skip existing, log attempts
-    daily_update.py         # Pull recent days; re-attempt scheduled retries
+    inventory_sync.py     # Pull station metadata, populate DB, apply geo filter
+    backfill.py           # Walk time range, skip existing, log attempts
+    daily_update.py       # Pull recent days; re-attempt scheduled retries
 
 scripts/
-  sync_inventory.py         # CLI entrypoint: refresh station metadata
-  run_backfill.py           # CLI entrypoint: historical fill
-  run_daily.py              # CLI entrypoint: cron-friendly daily pull (+ rsync)
-  audit_archive.py          # CLI entrypoint: coverage report, retry candidates
+  init_instance.py        # Scaffold a new instance directory from templates
+  sync_inventory.py       # CLI: refresh station metadata
+  run_backfill.py         # CLI: historical fill
+  run_daily.py            # CLI: cron-friendly daily pull (+ rsync)
+  audit_archive.py        # CLI: coverage report, retry candidates
 ```
+
+All scripts take `--instance <path>` or read `SDS_ARCHIVE_INSTANCE` from the environment.
 
 ---
 
 ## Database Schema
 
-Three tables in SQLite (`archive.db` at the SDS root or local staging dir):
+Three tables in SQLite (`archive.db` in the **instance directory** — never in the package repo):
 
 ### `stations`
 | Column | Notes |
@@ -163,5 +186,6 @@ Geoscience Australia ran a 2-year deployment across Victoria stored as ASDF on a
 - Do not trust metadata `start_date` / `end_date` as definitive waveform availability
 - Do not treat a failed or empty FDSN response as proof that no data exists
 - Do not write directly to the SMB mount during testing mode
-- Do not hardcode geographic bounds — read from `config/archive.yaml`
+- Do not hardcode geographic bounds — read from the instance `archive.yaml`
 - Do not use `pip install` alone — always update `environment.yml`
+- Do not put real instance configs (`archive.yaml`, `networks/*.yaml`, `archive.db`) into this repo — they belong in the instance directory on the VM

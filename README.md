@@ -19,24 +19,49 @@ Data is retrieved from remote **FDSN servers** via [ObsPy](https://docs.obspy.or
 
 ---
 
+## Package vs. Instance
+
+This repository is a **generic, reusable tool**. A specific deployment (e.g. "Victoria seismic archive") is an **instance** — a separate directory on your server containing only the configuration files and the live SQLite database for that deployment.
+
+```
+# Generic tool — this repo (public, version controlled here)
+~/sds_archive_builder/
+
+# Deployment instance — lives on your VM (not in this repo)
+~/instances/victoria/
+    archive.yaml          # Paths, geo bounds, retry policy
+    networks/
+        AU.yaml
+        GE.yaml
+    archive.db            # Live request-tracking DB
+    logs/
+```
+
+All scripts accept `--instance <path>` (or set `SDS_ARCHIVE_INSTANCE` in the environment). The instance directory is never committed to this repository.
+
+---
+
 ## Quick Start
 
-### 1. Set up the environment
+### 1. Install the package
 
 ```bash
 conda env create -f environment.yml
 conda activate sds_archive_builder
+pip install -e .
 ```
 
-### 2. Configure the archive
-
-Copy and edit the global config:
+### 2. Initialise a new instance
 
 ```bash
-cp config/archive.yaml.example config/archive.yaml
+python scripts/init_instance.py ~/instances/victoria
 ```
 
-Key settings in `config/archive.yaml`:
+This scaffolds the instance directory from templates with inline documentation.
+
+### 3. Edit the instance config
+
+Key settings in `~/instances/victoria/archive.yaml`:
 
 ```yaml
 sds_root: "/mnt/mediaflux/SDS"        # Final archive location (SMB mount)
@@ -47,48 +72,50 @@ geo_bounds:
   max_lat: -33.0
   min_lon: 140.0
   max_lon: 150.5
-  buffer_deg: 0.5                      # Expand inventory request by this amount
+  buffer_deg: 0.5                      # Expand inventory query by this amount
 ```
 
-### 3. Configure your networks
+### 4. Configure your networks
 
-Edit or add files in `config/networks/`. Each network gets its own YAML:
+Edit or add files in `~/instances/victoria/networks/`. Each network gets its own YAML:
 
 ```bash
-cp config/networks/template.yaml config/networks/AU.yaml
+cp ~/instances/victoria/networks/template.yaml ~/instances/victoria/networks/AU.yaml
 # edit AU.yaml for your network
 ```
 
-### 4. Sync station inventory
+### 5. Sync station inventory
 
 ```bash
-python scripts/sync_inventory.py
+python scripts/sync_inventory.py --instance ~/instances/victoria
 ```
 
 This fetches station metadata from all configured FDSN servers, applies the geographic filter, and populates the database.
 
-### 5. Run a backfill (testing mode)
+### 6. Run a backfill (testing mode)
 
 ```bash
 python scripts/run_backfill.py \
+  --instance ~/instances/victoria \
   --start 2020-01-01 \
   --end 2020-01-31 \
   --mode testing
 ```
 
-Testing mode writes to a temporary directory, never touches the main archive, and produces a coverage summary on exit.
+Testing mode writes to a temporary directory, never touches the main archive, and prints a coverage summary on exit.
 
-### 6. Run production backfill
+### 7. Run production backfill
 
 ```bash
-python scripts/run_backfill.py --start 2015-01-01
+python scripts/run_backfill.py --instance ~/instances/victoria --start 2015-01-01
 ```
 
-### 7. Schedule daily updates
+### 8. Schedule daily updates
 
 ```bash
 # Add to crontab — runs at 06:00 UTC daily
-0 6 * * * /path/to/conda/envs/sds_archive_builder/bin/python \
+0 6 * * * SDS_ARCHIVE_INSTANCE=~/instances/victoria \
+  /path/to/conda/envs/sds_archive_builder/bin/python \
   /path/to/scripts/run_daily.py --rsync
 ```
 
@@ -97,46 +124,56 @@ python scripts/run_backfill.py --start 2015-01-01
 ## Repository Structure
 
 ```
-sds_archive_builder/
-├── config/
-│   ├── archive.yaml.example         # Global config template
-│   └── networks/
-│       ├── template.yaml            # Network config template
-│       └── *.yaml                   # One file per network
+sds_archive_builder/             # This repo — generic tool only
 │
-├── sds_archive_builder/             # Main Python package
-│   ├── config.py                    # Config loading and validation
-│   ├── database.py                  # SQLite models (SQLAlchemy)
-│   ├── geo_filter.py                # Geographic bounds filtering
+├── config/
+│   └── templates/
+│       ├── archive.yaml         # Instance config template (copy to your instance dir)
+│       └── network.yaml         # Network config template
+│
+├── sds_archive_builder/         # Main Python package
+│   ├── config.py                # Config loading and validation
+│   ├── database.py              # SQLite models (SQLAlchemy)
+│   ├── geo_filter.py            # Geographic bounds filtering
 │   ├── clients/
-│   │   ├── base.py                  # Abstract client interface
-│   │   ├── fdsn_client.py           # ObsPy FDSN client + server fallback
-│   │   └── asdf_client.py           # pyasdf client (Phase 2)
+│   │   ├── base.py              # Abstract client interface
+│   │   ├── fdsn_client.py       # ObsPy FDSN client + server fallback
+│   │   └── asdf_client.py       # pyasdf client (Phase 2)
 │   ├── archive/
-│   │   ├── sds_writer.py            # Write Stream → SDS + staging/rsync logic
-│   │   └── sds_query.py             # Query SDS coverage by station/day
+│   │   ├── sds_writer.py        # Write Stream → SDS + staging/rsync logic
+│   │   └── sds_query.py         # Query SDS coverage by station/day
 │   └── runner/
-│       ├── inventory_sync.py        # Station metadata refresh
-│       ├── backfill.py              # Historical fill logic
-│       └── daily_update.py          # Daily pull + scheduled retries
+│       ├── inventory_sync.py    # Station metadata refresh
+│       ├── backfill.py          # Historical fill logic
+│       └── daily_update.py      # Daily pull + scheduled retries
 │
 ├── scripts/
-│   ├── sync_inventory.py            # CLI: refresh station inventory
-│   ├── run_backfill.py              # CLI: historical fill
-│   ├── run_daily.py                 # CLI: daily update + rsync
-│   └── audit_archive.py            # CLI: coverage report
+│   ├── init_instance.py         # Scaffold a new instance directory
+│   ├── sync_inventory.py        # CLI: refresh station inventory
+│   ├── run_backfill.py          # CLI: historical fill
+│   ├── run_daily.py             # CLI: daily update + rsync
+│   └── audit_archive.py         # CLI: coverage report
 │
 ├── environment.yml
 ├── pyproject.toml
-├── CLAUDE.md                        # Architecture notes for AI-assisted development
+├── CLAUDE.md
 └── README.md
+
+# Instance directory (on your VM — NOT in this repo)
+~/instances/victoria/
+    archive.yaml
+    networks/
+        AU.yaml
+        GE.yaml
+    archive.db               # Created automatically on first run
+    logs/
 ```
 
 ---
 
 ## Network Configuration
 
-Each file in `config/networks/` configures one seismic network:
+Each file in `<instance_dir>/networks/` configures one seismic network:
 
 ```yaml
 network: AU
