@@ -43,7 +43,7 @@ All scripts accept `--instance <path>` (or set `SDS_ARCHIVE_INSTANCE` in the env
 
 ## Quick Start
 
-### 1. Install the package
+### 1. Install
 
 ```bash
 conda env create -f environment.yml
@@ -51,73 +51,178 @@ conda activate sds_archive_builder
 pip install -e .
 ```
 
-### 2. Initialise a new instance
+### 2. Initialise an instance
+
+An **instance** is a directory on your server holding config and the tracking database for one deployment. It never goes in this repo.
 
 ```bash
-python scripts/init_instance.py ~/instances/victoria
+sds-init ~/instances/victoria
 ```
 
-This scaffolds the instance directory from templates with inline documentation.
+This copies the config templates into the instance directory with inline documentation.
 
 ### 3. Edit the instance config
 
-Key settings in `~/instances/victoria/archive.yaml`:
+`~/instances/victoria/archive.yaml` — set at minimum:
 
 ```yaml
-sds_root: "/mnt/mediaflux/SDS"        # Final archive location (SMB mount)
-local_staging: "/scratch/sds_staging"  # Local VM disk — fast, small
+sds_root: "/home/user/mnt/SDS/victoria"   # Final archive (SMB mount)
+local_staging: "/home/user/scratch/staging" # Local VM disk — fast, temporary
 
 geo_bounds:
-  min_lat: -39.5
-  max_lat: -33.0
-  min_lon: 140.0
-  max_lon: 150.5
-  buffer_deg: 0.5                      # Expand inventory query by this amount
+  min_lat: -39.0
+  max_lat: -36.0
+  min_lon: 144.5
+  max_lon: 149.0
+  buffer_deg: 0.5   # Inventory query is expanded by this — filtered back afterwards
 ```
 
-### 4. Configure your networks
+Then edit each file in `~/instances/victoria/networks/`. Key fields:
 
-Edit or add files in `~/instances/victoria/networks/`. Each network gets its own YAML:
-
-```bash
-cp ~/instances/victoria/networks/template.yaml ~/instances/victoria/networks/AU.yaml
-# edit AU.yaml for your network
+```yaml
+channels: ["HHZ", "HHN", "HHE", "BHZ", "BHN", "BHE"]  # High-rate seismic only
+servers:
+  primary: "EARTHSCOPE"
+  fallback: "https://auspass.edu.au"
+history:
+  start: "2000-01-01"   # Earliest date to attempt backfill
 ```
 
-### 5. Sync station inventory
+Channel naming follows SEED convention — band code first:
+`H`/`B`/`E`/`S` = high-rate seismic; `L` = long period (exclude); `N` = accelerometer (exclude).
+
+### 4. Sync station inventory
 
 ```bash
-python scripts/sync_inventory.py --instance ~/instances/victoria
+sds-inventory --instance ~/instances/victoria
 ```
 
-This fetches station metadata from all configured FDSN servers, applies the geographic filter, and populates the database.
+Fetches station metadata from all configured servers, applies the geographic filter, and populates the database. **Re-run this whenever you want to pick up new or recently added stations** (see [New stations](#new-stations)).
 
-### 6. Run a backfill (testing mode)
+### 5. Test with a short window
+
+Before committing to a full backfill, run a bounded test. This writes to a temporary directory and never touches the main archive:
 
 ```bash
-python scripts/run_backfill.py \
+sds-backfill \
   --instance ~/instances/victoria \
-  --start 2020-01-01 \
-  --end 2020-01-31 \
-  --mode testing
+  --start 2024-01-01 --end 2024-01-07 \
+  --testing -v
 ```
 
-Testing mode writes to a temporary directory, never touches the main archive, and prints a coverage summary on exit.
-
-### 7. Run production backfill
+Then audit what came back:
 
 ```bash
-python scripts/run_backfill.py --instance ~/instances/victoria --start 2015-01-01
+sds-audit --instance ~/instances/victoria --start 2024-01-01
 ```
 
-### 8. Schedule daily updates
+### 6. Production backfill
+
+Run inside `tmux` or `screen` so it survives SSH disconnects:
 
 ```bash
-# Add to crontab — runs at 06:00 UTC daily
-0 6 * * * SDS_ARCHIVE_INSTANCE=~/instances/victoria \
-  /path/to/conda/envs/sds_archive_builder/bin/python \
-  /path/to/scripts/run_daily.py --rsync
+tmux new -s backfill
+sds-backfill --instance ~/instances/victoria --start 2015-01-01 --delay 1.0
+# Ctrl-B D to detach; tmux attach -t backfill to return
 ```
+
+**Scale guide** (~90 channels across 4 networks):
+
+| Period | Requests | Wall time (est.) |
+|--------|----------|-----------------|
+| 1 year | ~33,000 | ~1–2 days |
+| 5 years | ~165,000 | ~5–10 days |
+| 10 years | ~330,000 | ~10–20 days |
+
+`no_data` responses return immediately (< 1s), so gaps in early years of S1/AM move fast.
+The default `newest_first` mode means recent data is usable quickly while older years fill in.
+
+**rsync to the main archive periodically during long backfills** — local staging disk is finite:
+
+```bash
+rsync -av --checksum ~/scratch/staging/ ~/mnt/SDS/victoria/
+```
+
+### 7. Schedule ongoing updates
+
+Add to crontab (`crontab -e`) on the VM:
+
+```cron
+# Daily — pull recent data + process retries + rsync to SMB (08:00 UTC)
+0 8 * * * SDS_ARCHIVE_INSTANCE=/home/user/instances/victoria \
+  /home/user/miniconda3/envs/sds_archive_builder/bin/sds-daily \
+  --rsync >> /home/user/instances/victoria/logs/cron.log 2>&1
+
+# Weekly — refresh station inventory to pick up new stations (Sunday 07:00 UTC)
+0 7 * * 0 SDS_ARCHIVE_INSTANCE=/home/user/instances/victoria \
+  /home/user/miniconda3/envs/sds_archive_builder/bin/sds-inventory \
+  >> /home/user/instances/victoria/logs/cron.log 2>&1
+
+# Monthly — re-sweep full history to catch retrospectively uploaded data
+0 6 1 * * SDS_ARCHIVE_INSTANCE=/home/user/instances/victoria \
+  /home/user/miniconda3/envs/sds_archive_builder/bin/sds-backfill \
+  --start 2015-01-01 --delay 1.0 \
+  >> /home/user/instances/victoria/logs/cron.log 2>&1
+```
+
+### 8. Monitor
+
+```bash
+# Coverage report for a date range
+sds-audit --instance ~/instances/victoria --start 2024-01-01
+
+# Show gaps and retries due
+sds-audit --instance ~/instances/victoria --start 2024-01-01 \
+  --show-missing --show-retries
+
+# Quick DB status
+sqlite3 ~/instances/victoria/archive.db \
+  "SELECT status, count(*) FROM fetch_requests GROUP BY status"
+```
+
+---
+
+## Key Concepts
+
+### The tracking database (`archive.db`)
+
+Every waveform request — success or failure — is recorded in `archive.db` in the instance directory. This is the **source of truth** for what has been attempted and what has been written.
+
+- **Treat it as precious.** Back it up alongside the SDS archive.
+- **Never delete it** in production. Without it, the backfill loses all memory of what's been done and will re-request everything.
+- Re-running a backfill over an already-completed date range is safe and efficient: successful days are skipped immediately; only `no_data`/`error` records past their retry window generate new requests.
+
+### Retries
+
+`no_data` does not mean no data exists — upstream servers for networks like S1 (AusArray) are actively adding historical data. Every `no_data` response is scheduled for retry at increasing intervals (default: 7 → 30 → 90 days).
+
+Retries are activated by two things:
+- **`sds-daily`** — processes all due retries automatically on each run
+- **Re-running `sds-backfill`** over the same date range — once a retry window has elapsed, the record is no longer skipped
+
+The monthly cron entry above ensures historical gaps are re-swept as new data comes online.
+
+### New stations
+
+New stations — whether newly deployed or newly added to an FDSN server — are picked up by re-running `sds-inventory`. The weekly cron entry handles this automatically. After a new station appears in the DB:
+
+- The **daily job** will fetch recent days for it automatically
+- Historical data for it will be fetched on the next **monthly backfill sweep**
+- Or immediately with a manual `sds-backfill --start <earliest date>`
+
+### Write strategy
+
+```
+FDSN Server
+    │
+    ▼
+local_staging (local VM disk — fast, holds weeks–months of data)
+    │
+    ▼  rsync (--rsync flag on sds-daily, or manually)
+sds_root (SMB/MediaFlux — main long-term archive)
+```
+
+Data lands on local disk first, protecting against SMB unavailability during acquisition. The rsync step is incremental (`--checksum`) so re-running it is safe.
 
 ---
 
