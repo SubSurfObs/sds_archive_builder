@@ -19,8 +19,8 @@ location_codes:
   - "10"
 
 servers:
-  # ObsPy shortname "IRIS" resolves to EarthScope (service.earthscope.org)
-  primary: "IRIS"
+  # ObsPy shortname — "IRIS" still works but "EARTHSCOPE" avoids deprecation warning
+  primary: "EARTHSCOPE"
   fallback: "https://auspass.edu.au"
 
 history:

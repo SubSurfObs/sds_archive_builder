@@ -55,32 +55,55 @@ def sync_network_inventory(
     # Apply strict geo filter
     filtered_inv = filter_inventory(inv, bounds)
 
-    # Collect all SEED IDs in the filtered inventory (in-bounds)
-    in_bounds_ids: set[tuple] = set()
-    station_rows = []
+    # Collect all SEED IDs in the filtered inventory (in-bounds).
+    # A single (net.sta.loc.cha) may have multiple epochs (sensor changes etc.) —
+    # deduplicate by SEED ID, keeping earliest start_date and latest end_date.
+    seed_rows: dict[tuple, dict] = {}
 
     for fdsn_net in filtered_inv.networks:
         for fdsn_sta in fdsn_net.stations:
             for cha in fdsn_sta.channels:
-                seed_id = (fdsn_net.code, fdsn_sta.code, cha.location_code, cha.code)
-                in_bounds_ids.add(seed_id)
+                seed_id = (fdsn_net.code, fdsn_sta.code, cha.location_code or "", cha.code)
 
                 start_date = cha.start_date.date if cha.start_date else None
                 end_date = cha.end_date.date if cha.end_date else None
 
-                station_rows.append({
-                    "network": fdsn_net.code,
-                    "station": fdsn_sta.code,
-                    "location": cha.location_code or "",
-                    "channel": cha.code,
-                    "latitude": fdsn_sta.latitude,
-                    "longitude": fdsn_sta.longitude,
-                    "elevation": fdsn_sta.elevation,
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "in_geo_bounds": True,
-                    "last_inventory_sync": datetime.utcnow(),
-                })
+                if seed_id not in seed_rows:
+                    seed_rows[seed_id] = {
+                        "network": fdsn_net.code,
+                        "station": fdsn_sta.code,
+                        "location": cha.location_code or "",
+                        "channel": cha.code,
+                        "latitude": fdsn_sta.latitude,
+                        "longitude": fdsn_sta.longitude,
+                        "elevation": fdsn_sta.elevation,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "in_geo_bounds": True,
+                        "last_inventory_sync": datetime.utcnow(),
+                    }
+                else:
+                    existing = seed_rows[seed_id]
+                    # Keep earliest start_date (useful as a backfill lower bound)
+                    if start_date and (existing["start_date"] is None or start_date < existing["start_date"]):
+                        existing["start_date"] = start_date
+                    # Keep latest end_date; None means currently active
+                    if end_date is None:
+                        existing["end_date"] = None
+                    elif existing["end_date"] is not None and end_date > existing["end_date"]:
+                        existing["end_date"] = end_date
+
+    station_rows = list(seed_rows.values())
+    n_epochs_raw = sum(
+        len(fdsn_sta.channels)
+        for fdsn_net in filtered_inv.networks
+        for fdsn_sta in fdsn_net.stations
+    )
+    if n_epochs_raw != len(station_rows):
+        logger.debug(
+            "%s: deduplicated %d channel-epochs → %d unique SEED IDs",
+            net, n_epochs_raw, len(station_rows),
+        )
 
     n_upserted = 0
     if not dry_run:
