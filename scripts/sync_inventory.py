@@ -46,12 +46,16 @@ def main(instance: str, network: tuple, dry_run: bool, verbose: bool):
     )
 
     click.echo("\n── Inventory Sync Summary ──")
+    click.echo(f"  {'Network':<8}  {'Stations':>8}  {'Channels':>8}")
+    click.echo(f"  {'-'*8}  {'-'*8}  {'-'*8}")
     for s in summaries:
         if "error" in s:
-            click.echo(f"  {s['network']:6s}  ERROR: {s['error']}")
+            click.echo(f"  {s['network']:<8}  ERROR: {s['error']}")
         else:
             dr = " [dry run]" if s.get("dry_run") else ""
-            click.echo(f"  {s['network']:6s}  {s['total_channels']:4d} channels in bounds{dr}")
+            click.echo(
+                f"  {s['network']:<8}  {s['unique_stations']:>8}  {s['unique_channels']:>8}{dr}"
+            )
 
 
 if __name__ == "__main__":

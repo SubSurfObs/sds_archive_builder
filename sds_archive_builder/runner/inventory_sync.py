@@ -94,6 +94,7 @@ def sync_network_inventory(
                         existing["end_date"] = end_date
 
     station_rows = list(seed_rows.values())
+    unique_stations = len({(r["network"], r["station"]) for r in station_rows})
     n_epochs_raw = sum(
         len(fdsn_sta.channels)
         for fdsn_net in filtered_inv.networks
@@ -101,8 +102,8 @@ def sync_network_inventory(
     )
     if n_epochs_raw != len(station_rows):
         logger.debug(
-            "%s: deduplicated %d channel-epochs → %d unique SEED IDs",
-            net, n_epochs_raw, len(station_rows),
+            "%s: deduplicated %d channel-epochs → %d unique SEED IDs across %d stations",
+            net, n_epochs_raw, len(station_rows), unique_stations,
         )
 
     n_upserted = 0
@@ -114,13 +115,14 @@ def sync_network_inventory(
 
     summary = {
         "network": net,
-        "total_channels": len(station_rows),
+        "unique_stations": unique_stations,
+        "unique_channels": len(station_rows),
         "upserted": n_upserted,
         "dry_run": dry_run,
     }
     logger.info(
-        "Inventory sync %s: %d channels in bounds%s",
-        net, len(station_rows), " (dry run)" if dry_run else "",
+        "Inventory sync %s: %d stations / %d channels in bounds%s",
+        net, unique_stations, len(station_rows), " (dry run)" if dry_run else "",
     )
     return summary
 

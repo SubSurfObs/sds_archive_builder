@@ -19,6 +19,7 @@ from obspy.clients.fdsn.header import (
     FDSNNoDataException,
     FDSNException,
     FDSNNoAuthenticationServiceException,
+    FDSNNoServiceException,
 )
 from sqlalchemy.orm import Session
 
@@ -59,10 +60,20 @@ class FDSNClient(BaseClient):
         """Return a cached ObsPy Client for the given server URL/shortname."""
         if server not in self._clients:
             logger.debug("Creating ObsPy FDSN client for %s", server)
-            self._clients[server] = ObspyClient(
-                server,
-                timeout=self.arc_cfg.request_timeout_s,
-            )
+            try:
+                self._clients[server] = ObspyClient(
+                    server,
+                    timeout=self.arc_cfg.request_timeout_s,
+                )
+            except FDSNNoServiceException as exc:
+                # Server is unreachable or doesn't expose standard FDSN service
+                # endpoints. Record the failure and re-raise as FetchError so
+                # callers can try the fallback server.
+                logger.warning(
+                    "FDSN service discovery failed for %s: %s", server, exc
+                )
+                self._record_failure(server)
+                raise FetchError(f"No FDSN services at {server!r}: {exc}") from exc
         return self._clients[server]
 
     def _server_is_available(self, server: str) -> bool:
