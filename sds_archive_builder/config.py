@@ -203,6 +203,8 @@ def load_network_configs(instance_dir: Path) -> dict[str, NetworkConfig]:
 
     configs: dict[str, NetworkConfig] = {}
     for yaml_path in sorted(networks_dir.glob("*.yaml")):
+        if yaml_path.stem.startswith("_"):
+            continue  # skip template files (_template.yaml etc.)
         with open(yaml_path) as f:
             raw = yaml.safe_load(f)
 
