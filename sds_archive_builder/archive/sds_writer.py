@@ -104,7 +104,11 @@ def write_stream(
                 try:
                     existing = read(str(path))
                     combined = existing + chan_stream
-                    combined.merge(method=1, fill_value=None)
+                    # merge(method=1) handles overlaps; split() converts any
+                    # masked-array gaps back to separate traces so MSEED can
+                    # write them without error (gap info is preserved, not filled).
+                    combined.merge(method=1)
+                    combined = combined.split()
                     combined.sort()
                     combined.write(str(path), format="MSEED")
                     nbytes = path.stat().st_size

@@ -164,15 +164,20 @@ def run_backfill(
             logger.warning("No in-bounds stations found for %s — run inventory sync first", net_code)
             continue
 
+        n_days = sum(1 for _ in _date_range(net_start, end_date, archive_config.backfill.mode))
+        total_requests = len(stations) * n_days
+        req_num = 0
+
         logger.info(
-            "Backfill %s: %d channels, %s → %s (%s)",
-            net_code, len(stations), net_start, end_date, archive_config.backfill.mode,
+            "Backfill %s: %d channels × %d days = %d requests (%s)",
+            net_code, len(stations), n_days, total_requests, archive_config.backfill.mode,
         )
 
         client = FDSNClient(net_cfg, archive_config, engine)
 
         for day in date_range:
             for (net, sta, loc, cha) in stations:
+                req_num += 1
 
                 with session_scope(engine) as session:
                     if _should_skip(session, net, sta, loc, cha, day, server, staging, skip_existing):
@@ -182,6 +187,11 @@ def run_backfill(
                     # Determine attempt count
                     existing_req = get_fetch_request(session, net, sta, loc, cha, day, server)
                     attempt_count = (existing_req.attempt_count + 1) if existing_req else 1
+
+                logger.info(
+                    "[%d/%d] %s.%s.%s.%s %s",
+                    req_num, total_requests, net, sta, loc, cha, day,
+                )
 
                 try:
                     stream = client.get_waveforms(net, sta, loc, cha, day)
@@ -196,7 +206,7 @@ def run_backfill(
                             attempt_count=attempt_count,
                         )
                     totals["success"] += 1
-                    logger.debug("✓ %s.%s.%s.%s %s (%d bytes)", net, sta, loc, cha, day, nbytes)
+                    logger.info("  ✓ %d bytes", nbytes)
 
                 except NoDataError as exc:
                     retry_days = retry_policy.no_data_retry_days(attempt_count)
@@ -210,8 +220,7 @@ def run_backfill(
                             attempt_count=attempt_count,
                         )
                     totals["no_data"] += 1
-                    logger.debug("∅ %s.%s.%s.%s %s — no data (retry after %s)",
-                                 net, sta, loc, cha, day, retry_after)
+                    logger.info("  ∅ no data (retry after %s)", retry_after)
 
                 except RateLimitedError as exc:
                     retry_after = date.today() + timedelta(days=1)
