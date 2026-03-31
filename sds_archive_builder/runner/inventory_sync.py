@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-
-from obspy.core.inventory import Channel
+from fnmatch import fnmatch
 
 from sds_archive_builder.clients.fdsn_client import FDSNClient
 from sds_archive_builder.config import ArchiveConfig, NetworkConfig
@@ -55,6 +54,12 @@ def sync_network_inventory(
     # Apply strict geo filter
     filtered_inv = filter_inventory(inv, bounds)
 
+    configured_channels = network_config.channels
+
+    def _channel_wanted(code: str) -> bool:
+        """Match channel code against configured list; supports fnmatch wildcards."""
+        return any(fnmatch(code, pattern) for pattern in configured_channels)
+
     # Collect all SEED IDs in the filtered inventory (in-bounds).
     # A single (net.sta.loc.cha) may have multiple epochs (sensor changes etc.) —
     # deduplicate by SEED ID, keeping earliest start_date and latest end_date.
@@ -63,6 +68,8 @@ def sync_network_inventory(
     for fdsn_net in filtered_inv.networks:
         for fdsn_sta in fdsn_net.stations:
             for cha in fdsn_sta.channels:
+                if not _channel_wanted(cha.code):
+                    continue
                 seed_id = (fdsn_net.code, fdsn_sta.code, cha.location_code or "", cha.code)
 
                 start_date = cha.start_date.date if cha.start_date else None
