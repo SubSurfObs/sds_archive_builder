@@ -15,9 +15,6 @@ channels:
   - "HHZ"
   - "HHN"
   - "HHE"
-  - "HNZ"
-  - "HNN"
-  - "HNE"
   - "SHZ"
 
 location_codes:

@@ -5,13 +5,12 @@ network: AU
 description: "Australian National Seismograph Network — via IRIS/EarthScope"
 
 channels:
-  - "BHZ"
-  - "BHN"
-  - "BHE"
   - "HHZ"
   - "HHN"
   - "HHE"
-  - "LHZ"
+  - "BHZ"
+  - "BHN"
+  - "BHE"
 
 location_codes:
   - ""
