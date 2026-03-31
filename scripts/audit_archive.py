@@ -58,26 +58,27 @@ def main(instance, network, start, end, show_retries, show_missing, verbose):
     click.echo()
 
     with session_scope(engine) as session:
-        stations = get_stations_in_bounds(session)
+        stations = [
+            (s.network, s.station, s.location, s.channel)
+            for s in get_stations_in_bounds(session)
+        ]
 
     if networks:
-        stations = [s for s in stations if s.network in networks]
+        stations = [(n, s, l, c) for (n, s, l, c) in stations if n in networks]
 
     if not stations:
         click.echo("  No in-bounds stations found. Run sds-inventory first.")
         return
 
     total_days = total_present = 0
-    for sta in stations:
+    for (net, sta, loc, cha) in stations:
         summary = coverage_summary(
-            staging,
-            sta.network, sta.station, sta.location, sta.channel,
-            start_date, end_date,
+            staging, net, sta, loc, cha, start_date, end_date,
         )
         pct = summary["coverage_pct"]
         flag = "  " if pct >= 80 else "! " if pct >= 50 else "✗ "
         click.echo(
-            f"  {flag}{sta.network:6s} {sta.station:8s} {sta.location:4s} {sta.channel:4s} "
+            f"  {flag}{net:6s} {sta:8s} {loc:4s} {cha:4s} "
             f"  {summary['days_present']:4d}/{summary['total_days']:4d} days  "
             f"({pct:5.1f}%)"
         )
@@ -104,13 +105,17 @@ def main(instance, network, start, end, show_retries, show_missing, verbose):
     # ── Retries ───────────────────────────────────────────────────────────────
     if show_retries:
         with session_scope(engine) as session:
-            due = get_due_retries(session, today)
+            due = [
+                (r.network, r.station, r.location, r.channel,
+                 r.day, r.status, r.attempt_count, r.server)
+                for r in get_due_retries(session, today)
+            ]
         click.echo(f"\n── Retries Due Today ({len(due)}) ──")
-        for req in due[:50]:
+        for (rnet, rsta, rloc, rcha, rday, rstatus, rattempt, rserver) in due[:50]:
             click.echo(
-                f"  {req.network}.{req.station}.{req.location}.{req.channel}"
-                f"  {req.day}  {req.status}  attempt#{req.attempt_count}"
-                f"  {req.server}"
+                f"  {rnet}.{rsta}.{rloc}.{rcha}"
+                f"  {rday}  {rstatus}  attempt#{rattempt}"
+                f"  {rserver}"
             )
         if len(due) > 50:
             click.echo(f"  ... and {len(due) - 50} more")

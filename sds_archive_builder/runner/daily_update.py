@@ -80,19 +80,18 @@ def run_daily(
     if archive_config.daily.run_retries and not testing:
         engine = init_db(archive_config.db_path)
         with session_scope(engine) as session:
-            due = get_due_retries(session, today)
+            due = [(r.network, r.day) for r in get_due_retries(session, today)]
 
         if due:
             logger.info("Processing %d scheduled retries", len(due))
-            # Group retries by network for efficiency
             retry_by_net: dict[str, list] = {}
-            for req in due:
-                retry_by_net.setdefault(req.network, []).append(req)
+            for (net_code, day) in due:
+                retry_by_net.setdefault(net_code, []).append(day)
 
-            for net_code, reqs in retry_by_net.items():
+            for net_code, days in retry_by_net.items():
                 if net_code not in network_configs:
                     continue
-                days = sorted({r.day for r in reqs})
+                days = sorted(set(days))
                 logger.info("Retrying %d days for %s", len(days), net_code)
                 # Backfill handles the per-request skip logic, so just run
                 # over the distinct days; it will re-check retry_after per row
