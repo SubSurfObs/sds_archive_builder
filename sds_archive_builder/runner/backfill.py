@@ -152,9 +152,13 @@ def run_backfill(
         # Walk direction
         date_range = _date_range(net_start, end_date, archive_config.backfill.mode)
 
-        # Get in-bounds stations for this network
+        # Get in-bounds stations for this network — extract to plain tuples
+        # before the session closes to avoid DetachedInstanceError.
         with session_scope(engine) as session:
-            stations = get_stations_in_bounds(session, network=net_code)
+            stations = [
+                (s.network, s.station, s.location, s.channel)
+                for s in get_stations_in_bounds(session, network=net_code)
+            ]
 
         if not stations:
             logger.warning("No in-bounds stations found for %s — run inventory sync first", net_code)
@@ -168,11 +172,7 @@ def run_backfill(
         client = FDSNClient(net_cfg, archive_config, engine)
 
         for day in date_range:
-            for sta_row in stations:
-                net = sta_row.network
-                sta = sta_row.station
-                loc = sta_row.location
-                cha = sta_row.channel
+            for (net, sta, loc, cha) in stations:
 
                 with session_scope(engine) as session:
                     if _should_skip(session, net, sta, loc, cha, day, server, staging, skip_existing):
