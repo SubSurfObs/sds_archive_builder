@@ -8,9 +8,14 @@ Python tooling to build and maintain a local seismic waveform archive in **SDS (
 
 ## Deployment Context
 
-- **Runtime environment:** University Linux VM
-- **Archive storage:** SMB mount (MediaFlux) — treat as potentially slow or intermittently unavailable
-- **Write strategy:** Local VM disk first → `rsync` to SMB archive. Local disk is small (holds days–weeks of data)
+- **VM:** `dsand@172.26.149.194` (rs-l-pg2zyo.desktop.cloud.unimelb.edu.au), passwordless SSH configured
+- **Conda env:** `sds_archive_builder` at `~/miniconda3`
+- **Repo on VM:** `~/projects/sds_archive_builder`
+- **Production instance:** `~/instances/gippsland`
+- **Archive storage:** 2 TB SMB mount at `/mnt/sds_other_nets/gippsland` — writing directly, no local staging
+- **Write strategy:** Write directly to SMB (sufficient space, no staging needed). `local_staging` and `sds_root` both point to `/mnt/sds_other_nets/gippsland`
+- **Backfill start date:** 2025-01-01 (current scope; extend later)
+- **Background jobs:** Run inside `tmux` session named `backfill`
 - **Environment management:** **conda only** — do not suggest venv or pip-only workflows
 - **Git remote:** `https://github.com/SubSurfObs/sds_archive_builder.git`
 
@@ -185,7 +190,8 @@ Geoscience Australia ran a 2-year deployment across Victoria stored as ASDF on a
 
 - Do not trust metadata `start_date` / `end_date` as definitive waveform availability
 - Do not treat a failed or empty FDSN response as proof that no data exists
-- Do not write directly to the SMB mount during testing mode
 - Do not hardcode geographic bounds — read from the instance `archive.yaml`
 - Do not use `pip install` alone — always update `environment.yml`
 - Do not put real instance configs (`archive.yaml`, `networks/*.yaml`, `archive.db`) into this repo — they belong in the instance directory on the VM
+- Do not delete `archive.db` in production — it is the source of truth for all request history
+- Do not assume local staging is in use — the Gippsland instance writes directly to SMB

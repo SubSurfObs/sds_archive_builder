@@ -165,19 +165,50 @@ Add to crontab (`crontab -e`) on the VM:
   >> /home/user/instances/victoria/logs/cron.log 2>&1
 ```
 
-### 8. Monitor
+### 8. Check on progress
+
+**While a backfill is running:**
 
 ```bash
-# Coverage report for a date range
-sds-audit --instance ~/instances/victoria --start 2024-01-01
+# Attach to the tmux session to watch live output
+tmux attach -t backfill
+# Ctrl-B D to detach without stopping it
 
-# Show gaps and retries due
-sds-audit --instance ~/instances/victoria --start 2024-01-01 \
-  --show-missing --show-retries
+# Or tail the log file
+tail -f ~/instances/gippsland/logs/backfill.log
+```
 
-# Quick DB status
-sqlite3 ~/instances/victoria/archive.db \
+**Quick DB status — how many requests in each state:**
+
+```bash
+sqlite3 ~/instances/gippsland/archive.db \
   "SELECT status, count(*) FROM fetch_requests GROUP BY status"
+```
+
+**Coverage report for a date range:**
+
+```bash
+sds-audit --instance ~/instances/gippsland --start 2025-01-01
+```
+
+**Show gaps and retries:**
+
+```bash
+sds-audit --instance ~/instances/gippsland --start 2025-01-01 \
+  --show-missing --show-retries
+```
+
+**Disk usage:**
+
+```bash
+df -h /mnt/sds_other_nets/gippsland
+du -sh /mnt/sds_other_nets/gippsland
+```
+
+**Cron log:**
+
+```bash
+tail -f ~/instances/gippsland/logs/cron.log
 ```
 
 ---
@@ -212,17 +243,30 @@ New stations — whether newly deployed or newly added to an FDSN server — are
 
 ### Write strategy
 
-```
-FDSN Server
-    │
-    ▼
-local_staging (local VM disk — fast, holds weeks–months of data)
-    │
-    ▼  rsync (--rsync flag on sds-daily, or manually)
-sds_root (SMB/MediaFlux — main long-term archive)
+Two modes are supported depending on available disk space:
+
+**Direct to SMB** (recommended when storage is ample — e.g. 2 TB allocation):
+
+```yaml
+# archive.yaml — set both to the same SMB path
+sds_root: "/mnt/sds_other_nets/gippsland"
+local_staging: "/mnt/sds_other_nets/gippsland"
 ```
 
-Data lands on local disk first, protecting against SMB unavailability during acquisition. The rsync step is incremental (`--checksum`) so re-running it is safe.
+No rsync step needed. Simpler, and fine as long as the SMB mount is reliable.
+
+**Two-step via local staging** (use when local disk is small or SMB is unreliable):
+
+```yaml
+sds_root: "/mnt/smb/archive"
+local_staging: "/scratch/sds_staging"   # fast local disk
+```
+
+```
+FDSN Server → local_staging → rsync → sds_root
+```
+
+The `--rsync` flag on `sds-daily` triggers the sync step automatically.
 
 ---
 
