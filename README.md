@@ -213,6 +213,59 @@ tail -f ~/instances/gippsland/logs/cron.log
 
 ---
 
+## Direct Database Manipulation
+
+The SQLite database is plain SQL — you can inspect and patch state directly when needed.
+Use `~/miniconda3/bin/sqlite3` on the VM (sqlite3 may not be on PATH).
+
+```bash
+DB=~/instances/gippsland/archive.db
+SQLITE=~/miniconda3/bin/sqlite3
+```
+
+**Inspect retry state by network:**
+```bash
+$SQLITE $DB "SELECT network, status, attempt_count, retry_after, count(*)
+             FROM fetch_requests WHERE status='no_data'
+             GROUP BY network, attempt_count, retry_after ORDER BY network, attempt_count"
+```
+
+**Reset inflated retry dates** (e.g. after testing pushed attempt_count up):
+```bash
+# All no_data records back to 7 days / attempt_count=1
+$SQLITE $DB "UPDATE fetch_requests SET attempt_count=1, retry_after=date('now','+7 days')
+             WHERE status='no_data'"
+
+# Single network only
+$SQLITE $DB "UPDATE fetch_requests SET attempt_count=1, retry_after=date('now','+7 days')
+             WHERE status='no_data' AND network='AM'"
+```
+> Note: resetting `retry_after` without also resetting `attempt_count` is insufficient —
+> the next failed attempt will immediately re-push to the 90-day window.
+
+**Clear server backoff** (if a server recovered but the DB still shows it as backed off):
+```bash
+$SQLITE $DB "SELECT server, consecutive_failures, backoff_until FROM server_health"
+
+# Reset a specific server
+$SQLITE $DB "UPDATE server_health SET backoff_until=NULL, consecutive_failures=0
+             WHERE server='AUSPASS'"
+```
+
+**Force immediate retry of error records for recent dates:**
+```bash
+$SQLITE $DB "UPDATE fetch_requests SET retry_after=date('now')
+             WHERE status='error' AND day >= date('now','-7 days')"
+```
+
+**Known state gotcha — shared server backoff:**
+The `server_health` table is shared between the backfill and daily jobs. If the backfill
+triggers a server backoff (e.g. AUSPASS after repeated failures), the daily sweep inherits
+it. Backoffs expire automatically (max 2 hours), but you can clear them manually with the
+query above if the daily job is being blocked.
+
+---
+
 ## Key Concepts
 
 ### The tracking database (`archive.db`)
