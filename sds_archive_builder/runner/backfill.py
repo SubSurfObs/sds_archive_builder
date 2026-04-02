@@ -46,16 +46,32 @@ def _should_skip(
     server: str,
     staging_root: Path,
     skip_existing: bool,
+    recheck_days: int = 0,
 ) -> bool:
-    """Return True if this (station, day) should be skipped."""
-    # Already successfully written
+    """Return True if this (station, day) should be skipped.
+
+    Within the recheck window (day >= today - recheck_days), success records
+    and file-existence checks are bypassed so that new data can be merged into
+    existing SDS files. retry_after and max_attempts are also ignored, since the
+    daily sweep should be aggressive about recent days.
+    """
+    in_recheck_window = (
+        recheck_days > 0 and day >= date.today() - timedelta(days=recheck_days)
+    )
+
     req = get_fetch_request(session, net, sta, loc, cha, day, server)
-    if req and req.status == "success":
+
+    # Already successfully written — skip unless in recheck window
+    if req and req.status == "success" and not in_recheck_window:
         return True
 
-    # SDS file already present
-    if skip_existing and day_file_exists(staging_root, net, sta, loc, cha, day):
+    # SDS file already present — skip unless in recheck window (where we merge)
+    if skip_existing and not in_recheck_window and day_file_exists(staging_root, net, sta, loc, cha, day):
         return True
+
+    # In recheck window: always attempt regardless of retry schedule or attempt count
+    if in_recheck_window:
+        return False
 
     # Scheduled for future retry
     if req and req.retry_after and req.retry_after > date.today():
@@ -105,6 +121,7 @@ def run_backfill(
     testing: bool = False,
     test_output_dir: Optional[Path] = None,
     inter_request_delay_s: float = 1.0,
+    recheck_days: int = 0,
 ) -> dict:
     """
     Run a backfill across all in-bounds stations.
@@ -116,6 +133,9 @@ def run_backfill(
         testing: If True, write to test_output_dir instead of local_staging.
         test_output_dir: Required when testing=True.
         inter_request_delay_s: Seconds to sleep between requests.
+        recheck_days: Days from today within which existing success records are
+            re-fetched and merged rather than skipped. 0 = archive mode (never
+            re-fetch successes). Set to daily lookback window for daily sweeps.
 
     Returns:
         Summary dict with counts of success, no_data, error, skipped.
@@ -180,13 +200,18 @@ def run_backfill(
                 req_num += 1
 
                 with session_scope(engine) as session:
-                    if _should_skip(session, net, sta, loc, cha, day, server, staging, skip_existing):
+                    if _should_skip(session, net, sta, loc, cha, day, server, staging, skip_existing, recheck_days):
                         totals["skipped"] += 1
                         continue
 
-                    # Determine attempt count
+                    # Determine attempt count and whether we're rechecking a success
                     existing_req = get_fetch_request(session, net, sta, loc, cha, day, server)
                     attempt_count = (existing_req.attempt_count + 1) if existing_req else 1
+                    was_success = existing_req is not None and existing_req.status == "success"
+
+                in_recheck_window = (
+                    recheck_days > 0 and day >= date.today() - timedelta(days=recheck_days)
+                )
 
                 logger.info(
                     "[%d/%d] %s.%s.%s.%s %s",
@@ -209,20 +234,26 @@ def run_backfill(
                     logger.info("  ✓ %d bytes", nbytes)
 
                 except NoDataError as exc:
-                    retry_days = retry_policy.no_data_retry_days(attempt_count)
-                    retry_after = date.today() + timedelta(days=retry_days)
-                    with session_scope(engine) as session:
-                        _record_attempt(
-                            session, net, sta, loc, cha, day, server,
-                            status="no_data",
-                            error_message=str(exc),
-                            retry_after=retry_after,
-                            attempt_count=attempt_count,
-                        )
-                    totals["no_data"] += 1
-                    logger.info("  ∅ no data (retry after %s)", retry_after)
+                    if in_recheck_window and was_success:
+                        # Server has no new data but we already have a good file — keep success
+                        logger.debug("  ↺ recheck: no new data for %s.%s.%s.%s %s — keeping success", net, sta, loc, cha, day)
+                        totals["skipped"] += 1
+                    else:
+                        retry_days = retry_policy.no_data_retry_days(attempt_count)
+                        retry_after = date.today() + timedelta(days=retry_days)
+                        with session_scope(engine) as session:
+                            _record_attempt(
+                                session, net, sta, loc, cha, day, server,
+                                status="no_data",
+                                error_message=str(exc),
+                                retry_after=retry_after,
+                                attempt_count=attempt_count,
+                            )
+                        totals["no_data"] += 1
+                        logger.info("  ∅ no data (retry after %s)", retry_after)
 
                 except RateLimitedError as exc:
+                    # Rate limiting always recorded — server state regardless of recheck mode
                     retry_after = date.today() + timedelta(days=1)
                     with session_scope(engine) as session:
                         _record_attempt(
@@ -237,18 +268,23 @@ def run_backfill(
                     time.sleep(60)
 
                 except FetchError as exc:
-                    retry_days = retry_policy.error_backoff_days(attempt_count)
-                    retry_after = date.today() + timedelta(days=retry_days)
-                    with session_scope(engine) as session:
-                        _record_attempt(
-                            session, net, sta, loc, cha, day, server,
-                            status="error",
-                            error_message=str(exc),
-                            retry_after=retry_after,
-                            attempt_count=attempt_count,
-                        )
-                    totals["error"] += 1
-                    logger.warning("✗ %s.%s.%s.%s %s — error: %s", net, sta, loc, cha, day, exc)
+                    if in_recheck_window and was_success:
+                        # Transient server error — we already have data, keep success record
+                        logger.debug("  ↺ recheck: server error for %s.%s.%s.%s %s — keeping success", net, sta, loc, cha, day)
+                        totals["skipped"] += 1
+                    else:
+                        retry_days = retry_policy.error_backoff_days(attempt_count)
+                        retry_after = date.today() + timedelta(days=retry_days)
+                        with session_scope(engine) as session:
+                            _record_attempt(
+                                session, net, sta, loc, cha, day, server,
+                                status="error",
+                                error_message=str(exc),
+                                retry_after=retry_after,
+                                attempt_count=attempt_count,
+                            )
+                        totals["error"] += 1
+                        logger.warning("✗ %s.%s.%s.%s %s — error: %s", net, sta, loc, cha, day, exc)
 
                 if inter_request_delay_s > 0:
                     time.sleep(inter_request_delay_s)

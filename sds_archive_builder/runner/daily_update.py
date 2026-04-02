@@ -73,6 +73,7 @@ def run_daily(
             networks=[net_code],
             testing=testing,
             test_output_dir=test_output_dir,
+            recheck_days=archive_config.daily.recheck_days,
         )
         summary["networks"][net_code] = result
 

@@ -60,8 +60,14 @@ backfill:
 # ── Daily Update ─────────────────────────────────────────────────────────────
 
 daily:
-  # Pull waveforms for the last N days on each daily run (catches delayed data)
-  lookback_days: 7
+  # Pull waveforms for the last N days on each daily run (catches delayed data).
+  # With 3x-per-day cron and lookback_days: 3, each day gets ~9 fetch attempts.
+  lookback_days: 3
+  # Days from today within which existing "success" records are re-fetched and
+  # merged rather than skipped. Allows partial files (e.g. server had incomplete
+  # data on the first attempt) to be topped up on subsequent runs.
+  # Should be <= lookback_days. Set to 0 to disable (archive-mode behaviour).
+  recheck_days: 3
   # Run scheduled retries during the daily job
   run_retries: true
   # Rsync local_staging → sds_root after each daily run
