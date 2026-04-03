@@ -68,8 +68,11 @@ daily:
   # data on the first attempt) to be topped up on subsequent runs.
   # Should be <= lookback_days. Set to 0 to disable (archive-mode behaviour).
   recheck_days: 3
-  # Run scheduled retries during the daily job
-  run_retries: true
+  # Run scheduled retries during the daily job.
+  # Should be false — retry processing belongs in sds-backfill, which sweeps
+  # retry_after records naturally. Enabling this causes the daily job to do
+  # archive-scale work on every run.
+  run_retries: false
   # Rsync local_staging → sds_root after each daily run
   auto_rsync: false
   # rsync options (appended to: rsync -av <local_staging>/ <sds_root>/)

@@ -411,6 +411,12 @@ retry_policy:
 
 A deployment moves through three phases over its lifetime, each with different cron scheduling:
 
+### Retry processing
+
+Retry sweeps (records where `retry_after <= today`) belong in `sds-backfill`, not `sds-daily`.
+Set `run_retries: false` in `archive.yaml` — the daily job handles recent data via `recheck_days`;
+the backfill handles all older retry records naturally on each pass.
+
 ### Phase 1 — Active Archive Building (weeks to months)
 
 Run `sds-backfill` frequently to fill the archive aggressively. Server blocks from one run are
