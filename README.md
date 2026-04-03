@@ -407,13 +407,64 @@ retry_policy:
 
 ---
 
-## Operating Modes
+## Operational Phases
+
+A deployment moves through three phases over its lifetime, each with different cron scheduling:
+
+### Phase 1 — Active Archive Building (weeks to months)
+
+Run `sds-backfill` frequently to fill the archive aggressively. Server blocks from one run are
+resolved within a few days by the next. Disable this cron entry once you're satisfied with coverage.
+
+```cron
+# Active backfill — every 3 days
+0 6 */3 * * SDS_ARCHIVE_INSTANCE=... sds-backfill --delay 1.0 >> .../logs/cron.log 2>&1
+
+# Daily update — 3x/day throughout all phases
+0 6,14,22 * * * SDS_ARCHIVE_INSTANCE=... sds-daily --rsync >> .../logs/cron.log 2>&1
+
+# Weekly inventory refresh — keep during active phase to pick up new stations
+0 7 * * 0 SDS_ARCHIVE_INSTANCE=... sds-inventory >> .../logs/cron.log 2>&1
+```
+
+**Monitoring active building:** run `sds-audit` before and after each backfill pass to track
+coverage improvement. Compare DB status counts to watch errors being resolved:
+
+```bash
+sqlite3 ~/instances/gippsland/archive.db \
+  "SELECT network, status, count(*) FROM fetch_requests GROUP BY network, status"
+```
+
+### Phase 2 — Steady State (ongoing)
+
+Once the archive is built out, switch to monthly infill. The daily job handles near-real-time
+data; the monthly sweep catches retrospectively uploaded historical data.
+
+```cron
+# Daily update — unchanged
+0 6,14,22 * * * SDS_ARCHIVE_INSTANCE=... sds-daily --rsync >> .../logs/cron.log 2>&1
+
+# Monthly infill — inventory first, then backfill
+0 5 1 * * SDS_ARCHIVE_INSTANCE=... sds-inventory >> .../logs/cron.log 2>&1
+0 6 1 * * SDS_ARCHIVE_INSTANCE=... sds-backfill --delay 1.0 >> .../logs/cron.log 2>&1
+```
+
+To switch from Phase 1 to Phase 2, replace `0 6 */3 * *` with `0 6 1 * *` in the crontab,
+and add the inventory line above it.
+
+### Backfill start date
+
+Set `history.start` in each network YAML — this is the earliest date `sds-backfill` will
+attempt when no `--start` flag is given. Update it in the instance `networks/*.yaml` files,
+not in the code or cron command.
+
+### CLI Modes
 
 | Mode | Description |
 |------|-------------|
 | `testing` | Bounded time window, verbose output, writes to temp dir only |
 | `backfill` | Fill historical data from `history.start` to present |
-| `daily` | Pull recent days; process scheduled retries; optionally rsync |
+| `daily` | Pull recent days; recheck recent successes to merge partial data; process retries |
 | `audit` | Read-only coverage report and retry candidate list |
 
 ---

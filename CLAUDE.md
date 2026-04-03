@@ -14,8 +14,9 @@ Python tooling to build and maintain a local seismic waveform archive in **SDS (
 - **Production instance:** `~/instances/gippsland`
 - **Archive storage:** 2 TB SMB mount at `/mnt/sds_other_nets/gippsland` — writing directly, no local staging
 - **Write strategy:** Write directly to SMB (sufficient space, no staging needed). `local_staging` and `sds_root` both point to `/mnt/sds_other_nets/gippsland`
-- **Backfill start date:** 2025-01-01 (current scope; extend later)
-- **Background jobs:** Run inside `tmux` session named `backfill`
+- **Backfill start date:** 2025-01-01 — set in each `~/instances/gippsland/networks/*.yaml` as `history.start`; do not pass `--start` on the CLI
+- **Current operational phase:** Active Archive Building — `sds-backfill` running every 3 days via cron (`0 6 */3 * *`); expected to run until ~June 2026, then switch to Steady State (monthly infill)
+- **Background jobs:** Ad-hoc backfills run in `tmux` session named `backfill`; daily/backfill/inventory run via cron (no tmux)
 - **Environment management:** **conda only** — do not suggest venv or pip-only workflows
 - **Git remote:** `https://github.com/SubSurfObs/sds_archive_builder.git`
 
@@ -143,14 +144,26 @@ The tighter operational filter is applied post-fetch from the `stations` table (
 
 ---
 
-## Operating Modes
+## Operating Modes (CLI)
 
 | Mode | Description |
 |------|-------------|
 | `testing` | Bounded time window, verbose logging, no writes to main archive |
 | `backfill` | Historical fill from `history.start` to present, oldest- or newest-first |
-| `daily` | Pull last N days; run scheduled retries; optionally rsync to SMB |
+| `daily` | Pull last N days; recheck recent successes for partial-file merging; process retries |
 | `audit` | Read-only; report coverage gaps and retry candidates |
+
+## Operational Phases (Deployment Lifecycle)
+
+| Phase | Cron schedule | Duration |
+|-------|--------------|----------|
+| **Active Archive Building** | `sds-backfill` every 3 days (`0 6 */3 * *`) | ~2 months |
+| **Steady State** | `sds-inventory` + `sds-backfill` monthly (`0 5/6 1 * *`) | Ongoing |
+| **Daily update** | `sds-daily` 3x/day (`0 6,14,22 * * *`) | Always |
+
+To switch from Active to Steady State: replace `0 6 */3 * *` with `0 5 1 * *  sds-inventory` + `0 6 1 * *  sds-backfill` in the crontab.
+
+**Monitoring active building:** compare `sds-audit` output and DB status counts across successive backfill passes to quantify how much data was recovered from servers that blocked on the first pass.
 
 ---
 
