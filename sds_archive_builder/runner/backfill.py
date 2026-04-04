@@ -7,7 +7,8 @@ to today (or a user-specified end), requesting one day at a time.
 Skips:
   - Days already present in the SDS archive (if skip_existing=True)
   - Days with a "success" record in the DB
-  - Days where retry_after is in the future
+  - Days where retry_after is in the future (unless ignore_retry_schedule=True)
+  - Days exceeding max attempt count (unless ignore_retry_schedule=True)
 
 Records every attempt in fetch_requests, regardless of outcome.
 
@@ -56,40 +57,33 @@ def _should_skip(
     server: str,
     staging_root: Path,
     skip_existing: bool,
-    recheck_days: int = 0,
+    ignore_retry_schedule: bool = False,
 ) -> bool:
     """Return True if this (station, day) should be skipped.
 
-    Within the recheck window (day >= today - recheck_days), success records
-    and file-existence checks are bypassed so that new data can be merged into
-    existing SDS files. retry_after and max_attempts are also ignored, since the
-    daily sweep should be aggressive about recent days.
+    Args:
+        ignore_retry_schedule: When True (daily mode), skip only on an existing
+            success record — retry_after and attempt_count are ignored. This
+            ensures the daily job fetches recent data regardless of server backoff
+            state accumulated during historical fills.
+            When False (backfill mode), all skip conditions apply.
     """
-    in_recheck_window = (
-        recheck_days > 0 and day >= date.today() - timedelta(days=recheck_days)
-    )
-
     req = get_fetch_request(session, net, sta, loc, cha, day, server)
 
-    # Already successfully written — skip unless in recheck window
-    if req and req.status == "success" and not in_recheck_window:
+    # Always skip genuine successes
+    if req and req.status == "success":
         return True
 
-    # SDS file already present — skip unless in recheck window (where we merge)
-    if skip_existing and not in_recheck_window and day_file_exists(staging_root, net, sta, loc, cha, day):
+    # SDS file already present on disk
+    if skip_existing and day_file_exists(staging_root, net, sta, loc, cha, day):
         return True
 
-    # In recheck window: always attempt regardless of retry schedule or attempt count
-    if in_recheck_window:
-        return False
-
-    # Scheduled for future retry
-    if req and req.retry_after and req.retry_after > date.today():
-        return True
-
-    # Exhausted max attempts
-    if req and req.attempt_count >= 5:
-        return True
+    # Retry schedule checks — bypassed for daily mode
+    if not ignore_retry_schedule:
+        if req and req.retry_after and req.retry_after > date.today():
+            return True
+        if req and req.attempt_count >= 5:
+            return True
 
     return False
 
@@ -132,7 +126,7 @@ class _WorkContext:
     staging: Path
     server: str
     skip_existing: bool
-    recheck_days: int
+    ignore_retry_schedule: bool
     retry_policy: RetryPolicy
     inter_request_delay_s: float
     # Thread-safe progress tracking
@@ -146,7 +140,7 @@ def _process_one(
     day: date,
 ) -> str:
     """
-    Fetch and record one (channel, day).  Returns the status key for totals.
+    Fetch and record one (channel, day). Returns the status key for totals.
 
     Creates its own FDSNClient so the ObsPy client cache (_clients dict) is
     not shared between threads.
@@ -154,25 +148,19 @@ def _process_one(
     engine = ctx.engine
     staging = ctx.staging
     server = ctx.server
-    recheck_days = ctx.recheck_days
 
     with ctx.lock:
         ctx.progress["n"] += 1
         req_num = ctx.progress["n"]
         total = ctx.progress["total"]
 
-    in_recheck_window = (
-        recheck_days > 0 and day >= date.today() - timedelta(days=recheck_days)
-    )
-
     with session_scope(engine) as session:
         if _should_skip(session, net, sta, loc, cha, day, server, staging,
-                        ctx.skip_existing, recheck_days):
+                        ctx.skip_existing, ctx.ignore_retry_schedule):
             return "skipped"
 
         existing_req = get_fetch_request(session, net, sta, loc, cha, day, server)
         attempt_count = (existing_req.attempt_count + 1) if existing_req else 1
-        was_success = existing_req is not None and existing_req.status == "success"
 
     logger.info("[%d/%d] %s.%s.%s.%s %s", req_num, total, net, sta, loc, cha, day)
 
@@ -200,12 +188,6 @@ def _process_one(
         return "success"
 
     except NoDataError as exc:
-        if in_recheck_window and was_success:
-            logger.debug(
-                "  ↺ recheck: no new data for %s.%s.%s.%s %s — keeping success",
-                net, sta, loc, cha, day,
-            )
-            return "skipped"
         retry_days = ctx.retry_policy.no_data_retry_days(attempt_count)
         retry_after = date.today() + timedelta(days=retry_days)
         with session_scope(engine) as session:
@@ -230,17 +212,11 @@ def _process_one(
                 attempt_count=attempt_count,
             )
         logger.warning("Rate limited on %s — server backed off", server)
-        # Do not sleep here: backoff_until is set in server_health; other workers
-        # will see the server as unavailable and skip it automatically.
+        # Do not sleep: backoff_until is set in server_health; subsequent workers
+        # will see the server as unavailable automatically.
         return "rate_limited"
 
     except FetchError as exc:
-        if in_recheck_window and was_success:
-            logger.debug(
-                "  ↺ recheck: server error for %s.%s.%s.%s %s — keeping success",
-                net, sta, loc, cha, day,
-            )
-            return "skipped"
         retry_days = ctx.retry_policy.error_backoff_days(attempt_count)
         retry_after = date.today() + timedelta(days=retry_days)
         with session_scope(engine) as session:
@@ -271,7 +247,7 @@ def run_backfill(
     testing: bool = False,
     test_output_dir: Optional[Path] = None,
     inter_request_delay_s: float = 1.0,
-    recheck_days: int = 0,
+    ignore_retry_schedule: bool = False,
 ) -> dict:
     """
     Run a backfill across all in-bounds stations.
@@ -283,16 +259,12 @@ def run_backfill(
         testing: If True, write to test_output_dir instead of local_staging.
         test_output_dir: Required when testing=True.
         inter_request_delay_s: Seconds to sleep between requests (per worker).
-        recheck_days: Days from today within which existing success records are
-            re-fetched and merged rather than skipped. 0 = archive mode (never
-            re-fetch successes). Set to daily lookback window for daily sweeps.
+        ignore_retry_schedule: When True, skip only on existing success records —
+            retry_after and attempt_count are ignored. Used by the daily runner to
+            fetch recent data regardless of server backoff state from historical fills.
 
     Returns:
         Summary dict with counts of success, no_data, error, skipped.
-
-    Concurrency:
-        Uses archive_config.max_concurrent_requests threads. With N workers and
-        inter_request_delay_s=1.0, throughput is ~N requests/second.
     """
     if testing and test_output_dir is None:
         raise ValueError("test_output_dir must be set when testing=True")
@@ -338,7 +310,6 @@ def run_backfill(
             )
             continue
 
-        # Build the full work list for this network
         date_list = list(_date_range(net_start, end_date, archive_config.backfill.mode))
         work_items = [
             (net, sta, loc, cha, day)
@@ -348,9 +319,10 @@ def run_backfill(
         total_requests = len(work_items)
 
         logger.info(
-            "Backfill %s: %d channels × %d days = %d requests (%s, workers=%d)",
+            "Backfill %s: %d channels × %d days = %d requests (%s, workers=%d%s)",
             net_code, len(stations), len(date_list), total_requests,
             archive_config.backfill.mode, max_workers,
+            ", ignore_retry_schedule" if ignore_retry_schedule else "",
         )
 
         ctx = _WorkContext(
@@ -360,7 +332,7 @@ def run_backfill(
             staging=staging,
             server=server,
             skip_existing=skip_existing,
-            recheck_days=recheck_days,
+            ignore_retry_schedule=ignore_retry_schedule,
             retry_policy=retry_policy,
             inter_request_delay_s=inter_request_delay_s,
             progress={"n": 0, "total": total_requests},

@@ -7,8 +7,10 @@ Pass 1 (fast, always):
     For each SDS file, compare its size against the median of ±7 neighbouring
     days for the same channel. Flag if:
       - Below absolute floor (4096 bytes), OR
-      - Below 20% of the rolling median (relative threshold).
-    Self-calibrating: no per-channel configuration needed.
+      - Below relative_threshold × median (default 0.20 for standalone,
+        configurable — daily workflow uses a stricter value e.g. 0.70).
+    Channel size index is built from ALL files so medians are accurate even
+    when a date window (since=) is applied.
 
 Pass 2 (slow, --full only):
     For each flagged file from pass 1, read with ObsPy and count actual
@@ -35,10 +37,10 @@ from sds_archive_builder.archive.sds_writer import sds_path
 
 logger = logging.getLogger(__name__)
 
-# Thresholds
+# Default thresholds
 ABSOLUTE_FLOOR_BYTES = 4096
-RELATIVE_THRESHOLD = 0.20   # flag if < 20% of median
-MEDIAN_WINDOW_DAYS = 7      # ± this many days around the candidate day
+DEFAULT_RELATIVE_THRESHOLD = 0.20   # standalone sds-verify default
+MEDIAN_WINDOW_DAYS = 7              # ± this many days around the candidate day
 
 
 @dataclass
@@ -51,7 +53,7 @@ class SuspectFile:
     path: Path
     file_bytes: int
     median_bytes: Optional[float]
-    reason: str          # "below_floor" | "below_relative" | "zero_samples"
+    reason: str          # "below_floor" | "below_relative" | "zero_samples" | "unreadable"
     sample_count: int = 0  # filled in by pass 2 if --full
 
 
@@ -100,33 +102,6 @@ def _iter_sds_files(sds_root: Path) -> Iterator[tuple[str, str, str, str, int, i
                         yield net, sta, loc, cha, file_year, julday, fpath
 
 
-def _collect_channel_sizes(
-    sds_root: Path,
-    net: str,
-    sta: str,
-    loc: str,
-    cha: str,
-) -> dict[date, int]:
-    """
-    Return {day: file_bytes} for all existing SDS files for a given channel.
-    Scans all years for this channel.
-    """
-    sizes: dict[date, int] = {}
-    pattern = f"*/{net}/{sta}/{cha}.D/{net}.{sta}.{loc}.{cha}.D.*.*"
-    for fpath in sds_root.glob(pattern):
-        parts = fpath.name.split(".")
-        if len(parts) != 7:
-            continue
-        try:
-            year = int(parts[5])
-            julday = int(parts[6])
-            d = date(year, 1, 1) + timedelta(days=julday - 1)
-            sizes[d] = fpath.stat().st_size
-        except (ValueError, OSError):
-            continue
-    return sizes
-
-
 def _rolling_median(sizes: dict[date, int], day: date, window: int) -> Optional[float]:
     """
     Compute median file size across ±window days (excluding the candidate day itself).
@@ -147,38 +122,41 @@ def run_verify(
     *,
     full: bool = False,
     network: Optional[str] = None,
+    relative_threshold: float = DEFAULT_RELATIVE_THRESHOLD,
+    since: Optional[date] = None,
 ) -> list[SuspectFile]:
     """
     Pass 1: walk SDS root and flag files below the size thresholds.
     Pass 2 (if full=True): read flagged files with ObsPy to count samples.
 
     Args:
-        sds_root:  Root of the SDS archive.
-        full:      If True, run ObsPy sample-count check on flagged files.
-        network:   Limit scan to this network code. None = all.
+        sds_root:           Root of the SDS archive.
+        full:               If True, run ObsPy sample-count check on flagged files.
+        network:            Limit scan to this network code. None = all.
+        relative_threshold: Flag if file < this fraction of the ±7-day rolling
+                            median. Default 0.20 (standalone); use 0.70 for the
+                            daily workflow to catch materially partial files.
+        since:              Only flag files on or after this date. The channel
+                            size index is still built from all files so medians
+                            are accurate. None = flag all dates.
 
     Returns:
         List of SuspectFile objects.
     """
-    # Collect all file sizes per channel for rolling median calculation.
-    # Group by (net, sta, loc, cha) as we encounter them.
+    # Build size index from ALL files for accurate medians, but only add
+    # files within the date window to the flagging list.
     channel_sizes: dict[tuple, dict[date, int]] = {}
-
-    # First pass: build size index
-    logger.info("Building file size index for %s ...", sds_root)
     all_files: list[tuple[str, str, str, str, date, Path, int]] = []
+
+    logger.info("Building file size index for %s ...", sds_root)
 
     for net, sta, loc, cha, year, julday, fpath in _iter_sds_files(sds_root):
         if network and net != network:
             continue
         try:
             nbytes = fpath.stat().st_size
-        except OSError:
-            continue
-
-        try:
             d = date(year, 1, 1) + timedelta(days=julday - 1)
-        except ValueError:
+        except (OSError, ValueError):
             continue
 
         key = (net, sta, loc, cha)
@@ -186,11 +164,18 @@ def run_verify(
             channel_sizes[key] = {}
         channel_sizes[key][d] = nbytes
 
-        all_files.append((net, sta, loc, cha, d, fpath, nbytes))
+        # Only flag files within the requested window
+        if since is None or d >= since:
+            all_files.append((net, sta, loc, cha, d, fpath, nbytes))
 
-    logger.info("Indexed %d files across %d channels", len(all_files), len(channel_sizes))
+    logger.info(
+        "Indexed %d channels; checking %d files%s",
+        len(channel_sizes),
+        len(all_files),
+        f" since {since}" if since else "",
+    )
 
-    # Second pass: flag suspects
+    # Flag suspects
     suspects: list[SuspectFile] = []
 
     for net, sta, loc, cha, d, fpath, nbytes in all_files:
@@ -203,7 +188,7 @@ def run_verify(
             reason = "below_floor"
         else:
             median = _rolling_median(sizes, d, MEDIAN_WINDOW_DAYS)
-            if median is not None and nbytes < RELATIVE_THRESHOLD * median:
+            if median is not None and nbytes < relative_threshold * median:
                 reason = "below_relative"
 
         if reason:
@@ -234,11 +219,8 @@ def run_verify(
                 sf.sample_count = sum(tr.stats.npts for tr in st)
                 if sf.sample_count == 0:
                     sf.reason = "zero_samples"
-                    still_suspect.append(sf)
-                else:
-                    # Has real samples — may be legitimately short; keep flagged
-                    # but leave reason as-is for human review
-                    still_suspect.append(sf)
+                still_suspect.append(sf)
+                if sf.sample_count > 0:
                     logger.debug(
                         "  %s %s — %d bytes but %d samples (may be OK)",
                         sf.path.name, sf.day, sf.file_bytes, sf.sample_count,

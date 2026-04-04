@@ -2,12 +2,15 @@
 Daily update runner.
 
 On each run:
-  1. Pull waveforms for the last `lookback_days` days per network
-     (accounts for data_lag_days and late-arriving data)
-  2. Process any scheduled retries (no_data / error requests where retry_after <= today)
-  3. Optionally rsync local_staging → sds_root
+  1. For each network: run sds-verify over the recent window to reset any
+     suspect files (empty stubs, partial downloads) so they are re-fetched.
+  2. Pull waveforms for the last N days per network. Skips existing successes;
+     ignores server backoff / retry_after state (daily data should always be
+     attempted regardless of historical fill backoff).
+  3. Optionally rsync local_staging → sds_root.
 
-This is designed to be called from cron. It is safe to run multiple times per day.
+The daily job does NOT process historical retries (run_retries: false). That
+belongs in sds-backfill, which sweeps retry_after records naturally on each pass.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ def run_daily(
     Args:
         networks: Limit to these network codes. None = all configured.
         rsync: If True, rsync local_staging → sds_root after fetching.
-        testing: Write to test_output_dir; skip rsync.
+        testing: Write to test_output_dir; skip rsync and verify.
         test_output_dir: Required when testing=True.
 
     Returns:
@@ -49,8 +52,8 @@ def run_daily(
     today = date.today()
     summary = {"date": today.isoformat(), "networks": {}, "rsync": None}
 
-    # ── 1. Fetch recent days per network ──────────────────────────────────────
     target_nets = networks or list(network_configs.keys())
+    staging = archive_config.local_staging
 
     for net_code in target_nets:
         if net_code not in network_configs:
@@ -58,11 +61,20 @@ def run_daily(
             continue
 
         net_cfg = network_configs[net_code]
-        # Pull back at least lookback_days, and also cover the network's data_lag
         lookback = max(archive_config.daily.lookback_days, net_cfg.data_lag_days + 2)
         start = today - timedelta(days=lookback)
-        end = today - timedelta(days=1)  # don't request today (incomplete day)
+        end = today - timedelta(days=1)
 
+        # ── 1. Verify recent files before fetching ────────────────────────────
+        # Reset any suspect files within the lookback window so they will be
+        # re-fetched in the fetch step below. Uses a stricter threshold than
+        # standalone sds-verify to catch materially partial files, not just stubs.
+        if archive_config.daily.verify_before_run and not testing:
+            _run_verify_for_network(
+                archive_config, net_cfg, net_code, staging, start,
+            )
+
+        # ── 2. Fetch recent days ──────────────────────────────────────────────
         logger.info("Daily update for %s: %s → %s", net_code, start, end)
 
         result = run_backfill(
@@ -73,39 +85,9 @@ def run_daily(
             networks=[net_code],
             testing=testing,
             test_output_dir=test_output_dir,
-            recheck_days=archive_config.daily.recheck_days,
+            ignore_retry_schedule=True,
         )
         summary["networks"][net_code] = result
-
-    # ── 2. Process scheduled retries ──────────────────────────────────────────
-    if archive_config.daily.run_retries and not testing:
-        engine = init_db(archive_config.db_path)
-        with session_scope(engine) as session:
-            due = [(r.network, r.day) for r in get_due_retries(session, today)]
-
-        if due:
-            logger.info("Processing %d scheduled retries", len(due))
-            retry_by_net: dict[str, list] = {}
-            for (net_code, day) in due:
-                retry_by_net.setdefault(net_code, []).append(day)
-
-            for net_code, days in retry_by_net.items():
-                if net_code not in network_configs:
-                    continue
-                days = sorted(set(days))
-                logger.info("Retrying %d days for %s", len(days), net_code)
-                # Backfill handles the per-request skip logic, so just run
-                # over the distinct days; it will re-check retry_after per row
-                retry_result = run_backfill(
-                    archive_config,
-                    {net_code: network_configs[net_code]},
-                    start=min(days),
-                    end=max(days),
-                    networks=[net_code],
-                )
-                summary.setdefault("retries", {})[net_code] = retry_result
-        else:
-            logger.debug("No retries due today")
 
     # ── 3. rsync ──────────────────────────────────────────────────────────────
     if rsync and not testing:
@@ -119,3 +101,37 @@ def run_daily(
         summary["rsync"] = "skipped (testing mode)"
 
     return summary
+
+
+def _run_verify_for_network(
+    archive_config: ArchiveConfig,
+    net_cfg: NetworkConfig,
+    net_code: str,
+    staging: Path,
+    since: date,
+) -> None:
+    """
+    Run a windowed sds-verify scan for one network and reset suspect files.
+
+    Uses archive_config.daily.verify_threshold (default 0.70) — stricter than
+    the standalone sds-verify default (0.20) to catch materially partial files.
+    """
+    from sds_archive_builder.archive.sds_verify import run_verify, fix_db_records
+
+    engine = init_db(archive_config.db_path)
+
+    suspects = run_verify(
+        staging,
+        network=net_code,
+        relative_threshold=archive_config.daily.verify_threshold,
+        since=since,
+    )
+
+    if suspects:
+        logger.info(
+            "sds-verify: %d suspect files since %s for %s — resetting for re-fetch",
+            len(suspects), since, net_code,
+        )
+        fix_db_records(suspects, engine, net_cfg.servers.primary)
+    else:
+        logger.debug("sds-verify: no suspect files since %s for %s", since, net_code)

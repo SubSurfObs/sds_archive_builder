@@ -61,17 +61,17 @@ backfill:
 
 daily:
   # Pull waveforms for the last N days on each daily run (catches delayed data).
-  # With 3x-per-day cron and lookback_days: 3, each day gets ~9 fetch attempts.
+  # With 3x-per-day cron and lookback_days: 3, each day gets ~3 attempts/day.
   lookback_days: 3
-  # Days from today within which existing "success" records are re-fetched and
-  # merged rather than skipped. Allows partial files (e.g. server had incomplete
-  # data on the first attempt) to be topped up on subsequent runs.
-  # Should be <= lookback_days. Set to 0 to disable (archive-mode behaviour).
-  recheck_days: 3
-  # Run scheduled retries during the daily job.
-  # Should be false — retry processing belongs in sds-backfill, which sweeps
-  # retry_after records naturally. Enabling this causes the daily job to do
-  # archive-scale work on every run.
+  # Run a file integrity scan (sds-verify) over the lookback window before
+  # each fetch. Resets suspect files so they are re-fetched in the same run.
+  verify_before_run: true
+  # Fraction of rolling median below which a file is considered suspect.
+  # Higher = stricter. 0.70 catches materially partial files (missing hours).
+  # The standalone sds-verify uses 0.20 (catches only near-empty stubs).
+  verify_threshold: 0.70
+  # Do NOT process scheduled retries during the daily job. Retry sweeps belong
+  # in sds-backfill which processes retry_after records naturally on each pass.
   run_retries: false
   # Rsync local_staging → sds_root after each daily run
   auto_rsync: false

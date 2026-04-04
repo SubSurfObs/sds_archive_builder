@@ -2,120 +2,93 @@
 
 ## Project Purpose
 
-Python tooling to build and maintain a local seismic waveform archive in **SDS (SeisComP Data Structure)** format. Data is pulled from remote **FDSN servers** (via ObsPy) and, in Phase 2, from **ASDF** (Adaptable Seismic Data Format) files. The archive covers a geographically-bounded region in SE Australia / Victoria.
+Python tooling to build and maintain a local seismic waveform archive in **SDS (SeisComP Data Structure)** format. Data is pulled from remote **FDSN servers** (via ObsPy) and, in Phase 2, from **ASDF** files. The archive covers a geographically-bounded region in SE Australia / Victoria.
 
 ---
 
 ## Deployment Context
 
-- **VM:** `dsand@172.26.149.194` (rs-l-pg2zyo.desktop.cloud.unimelb.edu.au), passwordless SSH configured
+- **VM:** `dsand@172.26.149.194` (rs-l-pg2zyo.desktop.cloud.unimelb.edu.au), passwordless SSH
 - **Conda env:** `sds_archive_builder` at `~/miniconda3`
 - **Repo on VM:** `~/projects/sds_archive_builder`
 - **Production instance:** `~/instances/gippsland`
-- **Archive storage:** 2 TB SMB mount at `/mnt/sds_other_nets/gippsland` — writing directly, no local staging
-- **Write strategy:** Write directly to SMB (sufficient space, no staging needed). `local_staging` and `sds_root` both point to `/mnt/sds_other_nets/gippsland`
-- **Backfill start date:** 2025-01-01 — set in each `~/instances/gippsland/networks/*.yaml` as `history.start`; do not pass `--start` on the CLI
-- **Current operational phase:** Active Archive Building — `sds-backfill` running every 3 days via cron (`0 6 */3 * *`); expected to run until ~June 2026, then switch to Steady State (monthly infill)
-- **Background jobs:** Ad-hoc backfills run in `tmux` session named `backfill`; daily/backfill/inventory run via cron (no tmux)
-- **Environment management:** **conda only** — do not suggest venv or pip-only workflows
+- **Archive storage:** 2 TB SMB at `/mnt/sds_other_nets/gippsland` — direct write (no staging). `local_staging` and `sds_root` both point to `/mnt/sds_other_nets/gippsland`
+- **Backfill start date:** 2025-01-01 — set in each `~/instances/gippsland/networks/*.yaml` as `history.start`; never pass `--start` on CLI
+- **Current phase:** Active Archive Building — backfill every 3 days, daily 3×/day; switch to monthly BAU ~June 2026
+- **Log timestamps:** AEDT (system local time), not UTC. Cron times also AEDT.
+- **sqlite3:** Not on PATH — use `~/miniconda3/bin/sqlite3`
+- **Environment management:** conda only — do not suggest venv or pip-only workflows
 - **Git remote:** `https://github.com/SubSurfObs/sds_archive_builder.git`
+
+---
+
+## Two Primary Workflows
+
+### 1. Historical archive build — `sds-backfill`
+
+Walks a date range for all in-bounds stations. Respects both `success` records and `retry_after` scheduling. Re-runs are efficient — successful days are skipped immediately; `no_data`/`error` records past their retry window are retried. Run inside tmux.
+
+### 2. Daily update — `sds-daily`
+
+Pulls the last N days (`lookback_days: 3`) on each run. Key distinctions from backfill:
+
+- **Respects `success`** — skips days already marked good
+- **Ignores `retry_after` and `attempt_count`** (`ignore_retry_schedule=True`) — server backoff state accumulated during historical fills is irrelevant for yesterday's data
+- **Runs `sds-verify` first** — scans the lookback window at a strict threshold (default 70% of median); resets partial files so they are re-fetched in the same run
+- **Does not sweep historical retries** — `run_retries: false`; that belongs in `sds-backfill`
+
+The daily job must not become a vehicle for re-processing the historical backlog. It handles only the recent window.
 
 ---
 
 ## Package vs. Instance
 
-The codebase is a **generic, installable tool**. A specific deployment (e.g. "Victoria seismic archive") is an **instance** — a separate directory containing only config files and the live SQLite database.
+Generic installable tool (this repo). A deployment instance is a separate directory on the VM:
 
 ```
-# The generic tool (this repo — public)
-~/sds_archive_builder/
-
-# A deployment instance (lives on the VM — not in this repo)
-~/instances/victoria/
-    archive.yaml          # Paths, geo bounds, retry policy for this deployment
+~/instances/gippsland/
+    archive.yaml          # Paths, geo bounds, retry policy, daily settings
     networks/
-        AU.yaml
-        GE.yaml
-    archive.db            # Live request-tracking DB — never committed anywhere
-    logs/                 # Log files — never committed
+        AM.yaml  AU.yaml  OZ.yaml  S1.yaml
+    archive.db            # Request-tracking DB — never commit
+    logs/
 ```
 
-All CLI scripts accept `--instance <path>` (or `SDS_ARCHIVE_INSTANCE` env var) pointing to the instance directory. No config files live in this repo except templates.
+No instance config lives in this repo — templates only (`config/templates/`).
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
-config/
-  templates/
-    archive.yaml          # Template: copy to instance dir and edit
-    network.yaml          # Template: one copy per network in instance/networks/
-
-sds_archive_builder/      # Main package (installed via conda)
+sds_archive_builder/
   config.py               # Load + validate instance YAML configs
   database.py             # SQLite via SQLAlchemy — stations, requests, server health
-  geo_filter.py           # Bounding box / polygon station filtering
+  geo_filter.py           # Bounding box station filtering
 
   clients/
-    base.py               # Abstract: fetch_waveforms(), fetch_inventory()
-    fdsn_client.py        # ObsPy FDSN with fallback servers + rate limiting
+    base.py               # Abstract: get_waveforms(), get_inventory()
+    fdsn_client.py        # ObsPy FDSN with fallback + server health tracking
     asdf_client.py        # pyasdf → ObsPy Stream (Phase 2)
 
   archive/
-    sds_writer.py         # Write ObsPy Stream to SDS (local-first)
+    sds_writer.py         # Write ObsPy Stream → SDS; merge with existing files
     sds_query.py          # Query local SDS for day-level coverage
+    sds_verify.py         # File integrity scan (size vs rolling median)
 
   runner/
-    inventory_sync.py     # Pull station metadata, populate DB, apply geo filter
-    backfill.py           # Walk time range, skip existing, log attempts
-    daily_update.py       # Pull recent days; re-attempt scheduled retries
+    inventory_sync.py     # Fetch station metadata; apply geo filter; populate DB
+    backfill.py           # Historical fill; ThreadPoolExecutor; respects retry schedule
+    daily_update.py       # Daily pull; runs verify first; ignores retry schedule
 
 scripts/
-  init_instance.py        # Scaffold a new instance directory from templates
-  sync_inventory.py       # CLI: refresh station metadata
-  run_backfill.py         # CLI: historical fill
-  run_daily.py            # CLI: cron-friendly daily pull (+ rsync)
-  audit_archive.py        # CLI: coverage report, retry candidates
+  init_instance.py        # Scaffold instance directory from templates
+  sync_inventory.py       # CLI: sds-inventory
+  run_backfill.py         # CLI: sds-backfill
+  run_daily.py            # CLI: sds-daily
+  verify_archive.py       # CLI: sds-verify
+  audit_archive.py        # CLI: sds-audit
 ```
-
-All scripts take `--instance <path>` or read `SDS_ARCHIVE_INSTANCE` from the environment.
-
----
-
-## Database Schema
-
-Three tables in SQLite (`archive.db` in the **instance directory** — never in the package repo):
-
-### `stations`
-| Column | Notes |
-|--------|-------|
-| `net`, `sta`, `loc`, `cha` | SEED identifiers |
-| `latitude`, `longitude`, `elevation` | From inventory |
-| `start_date`, `end_date` | Metadata epoch — treated as a **hint only**, not ground truth |
-| `in_geo_bounds` | Boolean; set at inventory sync |
-| `last_inventory_sync` | Timestamp |
-
-### `fetch_requests`
-| Column | Notes |
-|--------|-------|
-| `net`, `sta`, `loc`, `cha`, `day` | What was requested |
-| `server` | Which server was tried |
-| `status` | `pending` \| `success` \| `no_data` \| `error` \| `rate_limited` |
-| `attempt_count` | Incremented on each try |
-| `last_attempt` | Timestamp |
-| `bytes_written` | 0 if no data |
-| `error_message` | Last error string |
-| `retry_after` | Next scheduled retry date (for `no_data` / `error`) |
-
-### `server_health`
-| Column | Notes |
-|--------|-------|
-| `server` | Server name |
-| `last_success`, `last_failure` | Timestamps |
-| `consecutive_failures` | Reset on success |
-| `requests_today` | Rolling count |
-| `backoff_until` | Don't request before this time |
 
 ---
 
@@ -123,120 +96,120 @@ Three tables in SQLite (`archive.db` in the **instance directory** — never in 
 
 | Decision | Rationale |
 |----------|-----------|
-| Day-by-day request granularity | Natural SDS unit; enables per-day tracking and retry |
-| `no_data` ≠ permanent | Retrospective data uploads are expected; retry at 7d / 30d / 90d intervals |
-| Metadata start date = hint | Station epochs in metadata are sometimes wrong; treat as lower-bound hint |
-| Server fallback chain | Per-network primary + fallback server; skip server if `backoff_until` is in future |
-| Local-first writes | SMB may be slow or offline; always write to local staging, rsync separately |
-| Geographic filter at inventory sync | Filter once on metadata; don't re-check coordinates on every waveform fetch |
-| Adaptive rate limiting | Track `server_health`; back off exponentially on 429 / timeout |
-| Testing mode | Bounded date range + dry-run flag; does not write to archive or DB |
+| Day-by-day granularity | Natural SDS unit; enables per-day tracking and retry |
+| `no_data` ≠ permanent | Retrospective uploads expected; retry at 7d / 30d / 90d |
+| `ignore_retry_schedule` in daily | Server backoff from historical fills must not block recent-day fetches |
+| `sds-verify` in daily pipeline | Catches partial files before re-fetching; threshold 0.70 (stricter than standalone 0.20) |
+| `run_retries: false` | Retry sweep belongs in backfill; enabling in daily caused 2h+ archive-scale sweeps |
+| Zero-sample check in backfill | `npts=0` raises `NoDataError` — prevents 512-byte stubs being marked `success` |
+| One `FDSNClient` per thread | `self._clients` dict is not thread-safe; each worker instantiates its own client |
+| `write_stream` merges via `Stream.merge(method=1)` | Existing data preserved; file can only grow |
+| Metadata start date = hint | Station epochs in metadata are sometimes wrong |
+| Geographic filter at inventory sync | Filter once; don't re-check per waveform request |
+
+---
+
+## Database Schema
+
+Three tables in `archive.db` (instance directory — never in this repo):
+
+**`stations`** — one row per SEED channel ID (net.sta.loc.cha)
+- `in_geo_bounds`: set at inventory sync; only in-bounds stations are fetched
+
+**`fetch_requests`** — one row per (channel, day, server)
+- `status`: `pending` | `success` | `no_data` | `error` | `rate_limited`
+- `retry_after`: next scheduled attempt date (set for `no_data`/`error`)
+- `attempt_count`: incremented on each try; backfill skips at ≥ 5 (daily ignores this)
+
+**`server_health`** — adaptive backoff state per server
+- `backoff_until`: set after failures; checked by `FDSNClient` before each request
+- **Known issue:** `server_health` is shared between backfill and daily. An OZ/AUSPASS backoff from a historical fill can temporarily block the daily job. Backoffs expire automatically (max 2 hours); clear manually: `UPDATE server_health SET backoff_until=NULL WHERE server='AUSPASS'`
+
+---
+
+## sds-verify
+
+Scans the archive for suspect files. Two failure modes:
+- **512-byte stubs** — server returned empty MSEED; written before zero-sample check was added
+- **Partial files** — server had incomplete data on first fetch
+
+**Algorithm:**
+- Pass 1 (fast): file size vs median of ±7 neighbouring days. Flag if < 4096 bytes absolute OR < `relative_threshold` × median. Channel size index built from ALL files so medians are accurate even in windowed scans.
+- Pass 2 (`--full`): ObsPy sample count — separates empty from legitimately short files.
+
+**`--fix`:** resets flagged records to `status=error, retry_after=today, attempt_count=1`. No file deletion — `write_stream` merges on re-fetch.
+
+**Thresholds:**
+- Standalone (`sds-verify` cron): `--threshold 0.20` (default) — catches near-empty stubs
+- Daily pipeline: `verify_threshold: 0.70` in `archive.yaml` — catches materially partial files; configured per-instance
+
+**Windowed scan:** pass `--days N` (CLI) or `since=` (Python API) to limit flagging to a recent window. Full channel size index is still built for accurate medians.
+
+---
+
+## Operational Phases
+
+All cron times in AEDT (server local time).
+
+**Active Archive Building:**
+```cron
+0 5 */3 * *     sds-verify --instance ~/instances/gippsland --fix
+0 6 */3 * *     sds-backfill --instance ~/instances/gippsland --delay 1.0
+0 7 * * 0       sds-inventory --instance ~/instances/gippsland
+0 6,14,22 * * * sds-daily --instance ~/instances/gippsland --rsync
+```
+
+**BAU / Steady State:**
+```cron
+0 4 1 * *       sds-verify --instance ~/instances/gippsland --fix
+0 5 1 * *       sds-inventory --instance ~/instances/gippsland
+0 6 1 * *       sds-backfill --instance ~/instances/gippsland --delay 1.0
+0 6,14,22 * * * sds-daily --instance ~/instances/gippsland --rsync
+```
+
+Switch by replacing `*/3` with `1 *`. `sds-daily` is identical in both phases.
+
+Note: `sds-daily` also runs `sds-verify` internally (windowed, 70% threshold). The standalone cron entry above is a separate looser pass (20%) across the full archive before each backfill.
+
+**Monitoring:** compare `SELECT network, status, count(*) FROM fetch_requests GROUP BY network, status` across successive backfill passes to quantify data recovery. Switch to BAU when error counts plateau.
+
+---
+
+## Concurrency
+
+`run_backfill` uses `ThreadPoolExecutor(max_workers=archive_config.max_concurrent_requests)`. Default 2 workers → ~2 req/s (vs ~1 req/s serial). Each worker creates its own `FDSNClient`. Safe to raise to 4 for AU/AM; watch for 429s from AUSPASS (OZ/S1).
 
 ---
 
 ## Geographic Buffering
 
-When requesting station inventory, apply a **buffer** (configurable, default 0.5°) around the target bounding box. This accounts for:
-- Metadata coordinates that are slightly off
-- Stations just outside the target region that may still record relevant signals
-
-The tighter operational filter is applied post-fetch from the `stations` table (`in_geo_bounds`).
-
----
-
-## Operating Modes (CLI)
-
-| Mode | Description |
-|------|-------------|
-| `testing` | Bounded time window, verbose logging, no writes to main archive |
-| `backfill` | Historical fill from `history.start` to present; processes all due retry records |
-| `daily` | Pull last N days; recheck recent successes for partial-file merging; no retry sweep |
-| `audit` | Read-only; report coverage gaps and retry candidates |
-| `verify` | *(planned)* Scan archive for suspect files; optionally reset DB records for re-fetch |
-
-**Retry processing belongs in `sds-backfill`, not `sds-daily`.** Set `run_retries: false` in `archive.yaml`. The daily job handles recent data via `recheck_days`; the backfill handles all older retry records on each pass.
-
-## Operational Phases (Deployment Lifecycle)
-
-Full crontab for each phase (all times in server local time — currently AEDT):
-
-**Active Archive Building (~2 months):**
-```cron
-0 5 */3 * *     sds-verify --fix     # flag suspect files before each backfill
-0 6 */3 * *     sds-backfill         # every 3 days
-0 7 * * 0       sds-inventory        # weekly
-0 6,14,22 * * * sds-daily            # 3x/day always
-```
-
-**BAU / Steady State:**
-```cron
-0 4 1 * *       sds-verify --fix
-0 5 1 * *       sds-inventory
-0 6 1 * *       sds-backfill
-0 6,14,22 * * * sds-daily
-```
-
-The only difference between phases is the frequency of `sds-verify` + `sds-backfill` + `sds-inventory`. `sds-daily` is identical in both.
-
-To switch: replace `*/3` entries with `1 *` entries in the crontab.
-
-**Monitoring active building:** compare `sds-audit` output and DB status counts across successive backfill passes to quantify data recovered from servers that blocked on the first pass.
-
-## sds-verify (planned)
-
-Scans SDS archive for suspect files (empty or anomalously small). Two failure modes it catches:
-- **512-byte files** — server returned an empty MSEED record; incorrectly marked `success`
-- **Partial files** — server had incomplete data when first fetched
-
-**Algorithm:**
-- Pass 1 (fast): compare each file size to median of ±7 neighbouring days for same channel. Flag if below absolute floor (4096 bytes) or below 20% of median. Self-calibrating — no per-channel thresholds needed.
-- Pass 2 (slow, `--full`): read with ObsPy, count actual samples vs expected. Separates genuinely empty files from legitimately short ones.
-
-**`--fix` flag:** resets flagged DB records to `status=error, retry_after=today, attempt_count=1`. Does not delete files — `write_stream` merges on re-fetch. Without `--fix`, pure audit (safe to run anytime).
-
-**Files:** `sds_archive_builder/archive/sds_verify.py` + `scripts/verify_archive.py`
-**Entry point:** `sds-verify = "scripts.verify_archive:main"`
+Inventory queries are expanded by `buffer_deg` (default 0.5°) around the target bounds. The tighter `geo_bounds` filter is applied post-fetch via `in_geo_bounds` in the stations table.
 
 ---
 
 ## Conventions
 
-- All times in **UTC**
-- SEED channel codes (e.g. `HHZ`, `BHN`) — never assume a channel exists without checking inventory
-- SDS path format: `{sds_root}/{year}/{network}/{station}/{channel}.D/{net}.{sta}.{loc}.{cha}.D.{year}.{julday}`
-- Config files: **YAML** (not TOML, not JSON)
-- No hardcoded network names, server URLs, or date ranges in Python source — always from config
-- Log with Python `logging` module; scripts set up handlers; library code uses `getLogger(__name__)`
-
----
-
-## Environment Setup
-
-```bash
-conda env create -f environment.yml
-conda activate sds_archive_builder
-```
-
-Key dependencies: `obspy`, `sqlalchemy`, `pyyaml`, `click` (CLI), `pyasdf` (Phase 2).
+- All DB timestamps in **UTC**; log/cron times are AEDT on this VM
+- SEED channel codes — never assume a channel exists without checking inventory
+- SDS path: `{root}/{year}/{net}/{sta}/{cha}.D/{net}.{sta}.{loc}.{cha}.D.{year}.{julday}`
+- Config files: YAML only
+- No hardcoded network names, server URLs, or date ranges in Python source
+- Log with Python `logging`; scripts set up handlers; library code uses `getLogger(__name__)`
 
 ---
 
 ## Phase 2: ASDF Integration
 
-Geoscience Australia ran a 2-year deployment across Victoria stored as ASDF on a supercomputer. `asdf_client.py` will:
-1. Accept a path (local filesystem or SSH-mounted) to an ASDF HDF5 file
-2. Use `pyasdf.ASDFDataSet` to iterate waveforms
-3. Return `obspy.Stream` — identical interface to `fdsn_client.py`
-4. Log to `fetch_requests` with `server = "ASDF:<filename>"`
+GA ran a 2-year Victoria deployment stored as ASDF on a supercomputer. `asdf_client.py` will accept a path to an ASDF HDF5 file, iterate waveforms via `pyasdf.ASDFDataSet`, and return `obspy.Stream` — identical interface to `fdsn_client.py`. Logged to `fetch_requests` with `server = "ASDF:<filename>"`.
 
 ---
 
 ## What NOT to Do
 
 - Do not trust metadata `start_date` / `end_date` as definitive waveform availability
-- Do not treat a failed or empty FDSN response as proof that no data exists
-- Do not hardcode geographic bounds — read from the instance `archive.yaml`
+- Do not treat a failed FDSN response as proof that no data exists
+- Do not hardcode geographic bounds — read from `archive.yaml`
 - Do not use `pip install` alone — always update `environment.yml`
-- Do not put real instance configs (`archive.yaml`, `networks/*.yaml`, `archive.db`) into this repo — they belong in the instance directory on the VM
+- Do not commit instance configs (`archive.yaml`, `networks/*.yaml`, `archive.db`) — instance directory only
 - Do not delete `archive.db` in production — it is the source of truth for all request history
-- Do not assume local staging is in use — the Gippsland instance writes directly to SMB
+- Do not assume local staging is in use — Gippsland writes directly to SMB

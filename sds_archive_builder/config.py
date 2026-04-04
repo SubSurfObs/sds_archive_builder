@@ -69,10 +69,11 @@ class BackfillConfig:
 @dataclass
 class DailyConfig:
     lookback_days: int = 3
-    recheck_days: int = 3
-    run_retries: bool = True
+    run_retries: bool = False
     auto_rsync: bool = False
     rsync_options: str = "--checksum --delete"
+    verify_before_run: bool = True
+    verify_threshold: float = 0.70
 
 
 @dataclass
@@ -181,10 +182,11 @@ def load_archive_config(instance_dir: Path) -> ArchiveConfig:
         ),
         daily=DailyConfig(
             lookback_days=int(daily_raw.get("lookback_days", 3)),
-            recheck_days=int(daily_raw.get("recheck_days", 3)),
-            run_retries=bool(daily_raw.get("run_retries", True)),
+            run_retries=bool(daily_raw.get("run_retries", False)),
             auto_rsync=bool(daily_raw.get("auto_rsync", False)),
             rsync_options=daily_raw.get("rsync_options", "--checksum --delete"),
+            verify_before_run=bool(daily_raw.get("verify_before_run", True)),
+            verify_threshold=float(daily_raw.get("verify_threshold", 0.70)),
         ),
         logging=LoggingConfig(
             level=log_raw.get("level", "INFO"),
