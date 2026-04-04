@@ -149,21 +149,53 @@ The tighter operational filter is applied post-fetch from the `stations` table (
 | Mode | Description |
 |------|-------------|
 | `testing` | Bounded time window, verbose logging, no writes to main archive |
-| `backfill` | Historical fill from `history.start` to present, oldest- or newest-first |
-| `daily` | Pull last N days; recheck recent successes for partial-file merging; process retries |
+| `backfill` | Historical fill from `history.start` to present; processes all due retry records |
+| `daily` | Pull last N days; recheck recent successes for partial-file merging; no retry sweep |
 | `audit` | Read-only; report coverage gaps and retry candidates |
+| `verify` | *(planned)* Scan archive for suspect files; optionally reset DB records for re-fetch |
+
+**Retry processing belongs in `sds-backfill`, not `sds-daily`.** Set `run_retries: false` in `archive.yaml`. The daily job handles recent data via `recheck_days`; the backfill handles all older retry records on each pass.
 
 ## Operational Phases (Deployment Lifecycle)
 
-| Phase | Cron schedule | Duration |
-|-------|--------------|----------|
-| **Active Archive Building** | `sds-backfill` every 3 days (`0 6 */3 * *`) | ~2 months |
-| **Steady State** | `sds-inventory` + `sds-backfill` monthly (`0 5/6 1 * *`) | Ongoing |
-| **Daily update** | `sds-daily` 3x/day (`0 6,14,22 * * *`) | Always |
+Full crontab for each phase (all times in server local time — currently AEDT):
 
-To switch from Active to Steady State: replace `0 6 */3 * *` with `0 5 1 * *  sds-inventory` + `0 6 1 * *  sds-backfill` in the crontab.
+**Active Archive Building (~2 months):**
+```cron
+0 5 */3 * *     sds-verify --fix     # flag suspect files before each backfill
+0 6 */3 * *     sds-backfill         # every 3 days
+0 7 * * 0       sds-inventory        # weekly
+0 6,14,22 * * * sds-daily            # 3x/day always
+```
 
-**Monitoring active building:** compare `sds-audit` output and DB status counts across successive backfill passes to quantify how much data was recovered from servers that blocked on the first pass.
+**BAU / Steady State:**
+```cron
+0 4 1 * *       sds-verify --fix
+0 5 1 * *       sds-inventory
+0 6 1 * *       sds-backfill
+0 6,14,22 * * * sds-daily
+```
+
+The only difference between phases is the frequency of `sds-verify` + `sds-backfill` + `sds-inventory`. `sds-daily` is identical in both.
+
+To switch: replace `*/3` entries with `1 *` entries in the crontab.
+
+**Monitoring active building:** compare `sds-audit` output and DB status counts across successive backfill passes to quantify data recovered from servers that blocked on the first pass.
+
+## sds-verify (planned)
+
+Scans SDS archive for suspect files (empty or anomalously small). Two failure modes it catches:
+- **512-byte files** — server returned an empty MSEED record; incorrectly marked `success`
+- **Partial files** — server had incomplete data when first fetched
+
+**Algorithm:**
+- Pass 1 (fast): compare each file size to median of ±7 neighbouring days for same channel. Flag if below absolute floor (4096 bytes) or below 20% of median. Self-calibrating — no per-channel thresholds needed.
+- Pass 2 (slow, `--full`): read with ObsPy, count actual samples vs expected. Separates genuinely empty files from legitimately short ones.
+
+**`--fix` flag:** resets flagged DB records to `status=error, retry_after=today, attempt_count=1`. Does not delete files — `write_stream` merges on re-fetch. Without `--fix`, pure audit (safe to run anytime).
+
+**Files:** `sds_archive_builder/archive/sds_verify.py` + `scripts/verify_archive.py`
+**Entry point:** `sds-verify = "scripts.verify_archive:main"`
 
 ---
 
