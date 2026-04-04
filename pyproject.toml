@@ -23,6 +23,7 @@ sds-inventory  = "scripts.sync_inventory:main"
 sds-backfill   = "scripts.run_backfill:main"
 sds-daily      = "scripts.run_daily:main"
 sds-audit      = "scripts.audit_archive:main"
+sds-verify     = "scripts.verify_archive:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
