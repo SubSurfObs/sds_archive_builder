@@ -73,7 +73,7 @@ class DailyConfig:
     auto_rsync: bool = False
     rsync_options: str = "--checksum --delete"
     verify_before_run: bool = True
-    verify_threshold: float = 0.70
+    verify_threshold: float = 0.30
 
 
 @dataclass

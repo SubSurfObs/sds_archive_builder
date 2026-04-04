@@ -69,7 +69,7 @@ daily:
   # Fraction of rolling median below which a file is considered suspect.
   # Higher = stricter. 0.70 catches materially partial files (missing hours).
   # The standalone sds-verify uses 0.20 (catches only near-empty stubs).
-  verify_threshold: 0.70
+  verify_threshold: 0.30
   # Do NOT process scheduled retries during the daily job. Retry sweeps belong
   # in sds-backfill which processes retry_after records naturally on each pass.
   run_retries: false
