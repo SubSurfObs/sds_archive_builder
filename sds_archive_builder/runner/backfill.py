@@ -220,6 +220,11 @@ def run_backfill(
 
                 try:
                     stream = client.get_waveforms(net, sta, loc, cha, day)
+                    if sum(tr.stats.npts for tr in stream) == 0:
+                        raise NoDataError(
+                            f"Stream returned but contained no samples for "
+                            f"{net}.{sta}.{loc}.{cha} {day}"
+                        )
                     results = write_stream(stream, staging)
                     nbytes = sum(results.values())
 
