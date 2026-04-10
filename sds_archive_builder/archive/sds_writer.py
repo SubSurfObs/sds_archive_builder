@@ -130,11 +130,18 @@ def write_stream(
 
 
 def day_file_exists(staging_root: Path, net: str, sta: str, loc: str, cha: str, day: date) -> bool:
-    """Return True if an SDS file exists and is non-empty for this channel/day."""
+    """Return True if a substantive SDS file exists for this channel/day.
+
+    Files <= 4096 bytes are treated as absent — they are either empty MSEED
+    stubs or UTC-midnight slivers (one record written when a trace crossed day
+    boundaries). In both cases the file should be re-fetched and merged rather
+    than treated as complete. 4096 bytes matches the absolute floor used by
+    sds-verify, keeping the two checks consistent.
+    """
     year = day.year
     julday = day.timetuple().tm_yday
     path = sds_path(staging_root, net, sta, loc, cha, year, julday)
-    return path.exists() and path.stat().st_size > 0
+    return path.exists() and path.stat().st_size > 4096
 
 
 def sync_to_archive(staging_root: Path, sds_root: Path, rsync_options: str = "--checksum") -> bool:
