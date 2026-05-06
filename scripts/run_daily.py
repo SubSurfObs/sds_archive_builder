@@ -14,11 +14,13 @@ Crontab example (06:00 UTC daily):
 """
 
 import logging
+import sys
 
 import click
 
 from sds_archive_builder.config import load_instance
 from sds_archive_builder.database import init_db
+from sds_archive_builder.preflight import archive_paths_unavailable
 from sds_archive_builder.runner.daily_update import run_daily
 from scripts._logging import setup_logging
 
@@ -40,6 +42,11 @@ def main(instance, network, rsync, testing, verbose):
     """Daily waveform update and retry processing."""
     archive_cfg, network_cfgs = load_instance(instance)
     setup_logging(archive_cfg, verbose=verbose)
+
+    reason = archive_paths_unavailable(archive_cfg)
+    if reason:
+        logging.getLogger(__name__).error("Aborting daily: %s", reason)
+        sys.exit(1)
 
     init_db(archive_cfg.db_path)
 

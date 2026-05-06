@@ -14,6 +14,7 @@ Usage:
 """
 
 import logging
+import sys
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -22,6 +23,7 @@ import click
 
 from sds_archive_builder.config import load_instance
 from sds_archive_builder.database import init_db
+from sds_archive_builder.preflight import archive_paths_unavailable
 from sds_archive_builder.runner.backfill import run_backfill
 from scripts._logging import setup_logging
 
@@ -48,6 +50,11 @@ def main(instance, start, end, network, testing, delay, verbose):
     archive_cfg, network_cfgs = load_instance(instance)
     setup_logging(archive_cfg, verbose=verbose)
     logger = logging.getLogger(__name__)
+
+    reason = archive_paths_unavailable(archive_cfg)
+    if reason:
+        logger.error("Aborting backfill: %s", reason)
+        sys.exit(1)
 
     init_db(archive_cfg.db_path)
 
