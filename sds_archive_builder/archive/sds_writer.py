@@ -150,6 +150,10 @@ def sync_to_archive(staging_root: Path, sds_root: Path, rsync_options: str = "--
 
     Returns True on success, False on failure.
     """
+    if staging_root.samefile(sds_root):
+        logger.info("rsync skipped: staging_root and sds_root are the same path (%s)", sds_root)
+        return True
+
     cmd = [
         "rsync",
         "-av",
