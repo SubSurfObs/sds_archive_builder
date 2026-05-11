@@ -13,6 +13,7 @@ Python tooling to build and maintain a local seismic waveform archive in **SDS (
 - **Repo on VM:** `~/projects/sds_archive_builder`
 - **Production instance:** `~/instances/gippsland`
 - **Archive storage:** 2 TB SMB at `/mnt/sds_other_nets/gippsland` — direct write (no staging). `local_staging` and `sds_root` both point to `/mnt/sds_other_nets/gippsland`
+- **SMB mount persistence:** auto-mounted via `/etc/fstab` (cifs entry, creds at `/etc/cifs-mediaflux`). University VM gets resized occasionally and has wiped the manual mount in the past; the cron jobs now bail cleanly via the preflight guard if the mount is missing. If fstab itself is damaged or the entry is gone, re-run `sudo python3 ~/fix_fstab.py` on the VM — it strips malformed cifs lines and appends a clean one
 - **Backfill start date:** 2025-01-01 — set in each `~/instances/gippsland/networks/*.yaml` as `history.start`; never pass `--start` on CLI
 - **Current phase:** Active Archive Building — backfill every 3 days, daily 3×/day; switch to monthly BAU ~June 2026
 - **Log timestamps:** AEDT (system local time), not UTC. Cron times also AEDT.
