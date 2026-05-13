@@ -117,7 +117,7 @@ class NetworkConfig:
     location_codes: list[str]
     servers: ServerConfig
     history_start: str
-    data_lag_days: int = 2
+    data_lag_days: int = 0
     retry_policy: Optional[RetryPolicy] = None    # None → inherit from ArchiveConfig
     geo_bounds: Optional[GeoBounds] = None        # None → inherit from ArchiveConfig
 

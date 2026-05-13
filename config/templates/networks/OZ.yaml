@@ -24,6 +24,6 @@ servers:
 
 history:
   start: "2000-01-01"
-  # GA network has gaps; historical data continues to be made available.
-  # Treat no_data as potentially temporary.
-  data_lag_days: 3
+  # GA network has gaps and historical data continues to be made available;
+  # treat no_data as potentially temporary. Publish lag itself is sub-hour.
+  data_lag_days: 0

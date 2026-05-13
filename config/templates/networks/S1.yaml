@@ -1,8 +1,8 @@
-# Network S1 — AusArray (Geoscience Australia passive seismic experiment)
-# Served via AUSPASS. Historical data being progressively uploaded.
+# Network S1 — AuSIS, Australian Seismometers in Schools
+# Served via AUSPASS. Public open dataset; publish lag is sub-hour.
 
 network: S1
-description: "AusArray — Geoscience Australia passive seismic deployment"
+description: "AuSIS — Australian Seismometers in Schools"
 
 channels:
   - "HHZ"
@@ -21,10 +21,8 @@ servers:
   fallback: null
 
 history:
-  # AusArray deployments from ~2019 onwards
   start: "2019-01-01"
-  # Data upload is ongoing and may lag significantly
-  data_lag_days: 30
+  data_lag_days: 0
 
 retry_policy:
   max_attempts: 5

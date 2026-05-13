@@ -24,4 +24,4 @@ servers:
 
 history:
   start: "2000-01-01"
-  data_lag_days: 2
+  data_lag_days: 0

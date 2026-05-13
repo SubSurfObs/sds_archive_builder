@@ -33,9 +33,12 @@ servers:
 history:
   # Earliest date to attempt backfill. Format: YYYY-MM-DD
   start: "2000-01-01"
-  # How many days behind real-time data may arrive on this server.
-  # The daily runner pulls at least this many days back.
-  data_lag_days: 2
+  # Per-network retry-window-width knob (NOT actual FDSN publish lag).
+  # The daily runner widens its lookback to max(lookback_days, data_lag_days + 2)
+  # so that days a server initially failed on get more retry attempts. For
+  # near-real-time networks (AU, S1, OZ, AM) leave at 0; only raise it for
+  # networks whose servers genuinely take days to publish.
+  data_lag_days: 0
 
 # ── Retry Policy (optional — inherits from archive.yaml if omitted) ──────────
 # retry_policy:

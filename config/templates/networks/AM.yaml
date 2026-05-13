@@ -28,8 +28,8 @@ servers:
 history:
   # RaspberryShake network launched ~2016
   start: "2016-01-01"
-  # RS server is generally low-latency
-  data_lag_days: 1
+  # RS server is low-latency (publish lag well under a day)
+  data_lag_days: 0
 
 retry_policy:
   max_attempts: 3
