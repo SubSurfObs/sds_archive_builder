@@ -2,15 +2,18 @@
 Run a historical backfill.
 
 Usage:
-    # Production (writes to local_staging)
-    sds-backfill --instance ~/instances/victoria --start 2020-01-01
+    # Production — uses each network's history.start from its YAML config
+    sds-backfill --instance ~/instances/gippsland
+
+    # Override the per-network start (e.g. ad-hoc extension)
+    sds-backfill --instance ~/instances/gippsland --start 2022-01-01
+
+    # Single network with explicit window
+    sds-backfill --instance ~/instances/gippsland --network OZ --start 2022-01-01
 
     # Testing mode (writes to a temp dir, summary printed on exit)
-    sds-backfill --instance ~/instances/victoria \
+    sds-backfill --instance ~/instances/gippsland \
         --start 2020-01-01 --end 2020-01-31 --testing
-
-    # Single network
-    sds-backfill --instance ~/instances/victoria --network OZ --start 2022-01-01
 """
 
 import logging
@@ -34,8 +37,8 @@ from scripts._logging import setup_logging
     type=click.Path(exists=True, file_okay=False),
     help="Path to instance directory.",
 )
-@click.option("--start", required=True, type=click.DateTime(formats=["%Y-%m-%d"]),
-              help="Start date (YYYY-MM-DD).")
+@click.option("--start", default=None, type=click.DateTime(formats=["%Y-%m-%d"]),
+              help="Start date (YYYY-MM-DD). Default: use each network's history.start from its YAML.")
 @click.option("--end", default=None, type=click.DateTime(formats=["%Y-%m-%d"]),
               help="End date (YYYY-MM-DD). Default: yesterday.")
 @click.option("--network", "-n", multiple=True,
@@ -58,7 +61,7 @@ def main(instance, start, end, network, testing, delay, verbose):
 
     init_db(archive_cfg.db_path)
 
-    start_date = start.date()
+    start_date = start.date() if start else None
     end_date = end.date() if end else None
     networks = list(network) if network else None
 
